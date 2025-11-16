@@ -1,0 +1,54 @@
+2025-05-16 23:34:01,746 - ERROR - Error getting students: 'section'
+2025-05-16 23:34:01,826 - ERROR - Error getting students: 'section'
+2025-05-16 23:34:02,925 - ERROR - Error getting students: 'section'
+2025-05-16 23:34:02,994 - ERROR - Error getting students: 'section'
+2025-05-16 23:35:19,583 - ERROR - Error getting students: 'section'
+2025-05-16 23:35:19,653 - ERROR - Error getting students: 'section'
+2025-05-16 23:35:20,985 - ERROR - Error getting students: 'section'
+2025-05-16 23:35:21,052 - ERROR - Error getting students: 'section'
+2025-05-16 23:35:22,879 - ERROR - Error getting students: 'section'
+2025-05-16 23:35:22,952 - ERROR - Error getting students: 'section'
+2025-05-17 00:54:31,834 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 00:55:19,486 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 00:55:19,574 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 00:57:50,263 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 00:57:50,352 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 00:57:51,394 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 00:57:51,472 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 00:58:15,874 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 00:58:15,960 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 01:04:41,674 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 01:04:41,744 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 01:08:46,696 - INFO - Token payload: {'exp': 1747415640, 'sub': '12a1625c-15df-4752-aeec-730e6996b46b', 'type': 'student'}
+2025-05-17 01:08:46,697 - INFO - Student number from token: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:08:46,697 - INFO - Querying student with student_no: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:08:47,185 - INFO - Query response: []
+2025-05-17 01:08:50,237 - INFO - Token payload: {'exp': 1747415640, 'sub': '12a1625c-15df-4752-aeec-730e6996b46b', 'type': 'student'}
+2025-05-17 01:08:50,238 - INFO - Student number from token: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:08:50,239 - INFO - Querying student with student_no: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:08:50,299 - INFO - Query response: []
+2025-05-17 01:08:50,302 - INFO - Token payload: {'exp': 1747415640, 'sub': '12a1625c-15df-4752-aeec-730e6996b46b', 'type': 'student'}
+2025-05-17 01:08:50,302 - INFO - Student number from token: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:08:50,303 - INFO - Querying student with student_no: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:08:50,368 - INFO - Query response: []
+2025-05-17 01:08:53,006 - INFO - Token payload: {'exp': 1747415640, 'sub': '12a1625c-15df-4752-aeec-730e6996b46b', 'type': 'student'}
+2025-05-17 01:08:53,007 - INFO - Student number from token: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:08:53,007 - INFO - Querying student with student_no: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:08:53,703 - INFO - Query response: []
+2025-05-17 01:10:25,444 - INFO - Querying student with student_no: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:10:25,991 - INFO - Querying student with student_no: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:10:26,067 - INFO - Querying student with student_no: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:10:29,648 - INFO - Querying student with student_no: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:10:29,721 - INFO - Querying student with student_no: 12a1625c-15df-4752-aeec-730e6996b46b
+2025-05-17 01:12:08,956 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 01:12:13,065 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 01:12:13,128 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 01:12:22,096 - ERROR - Error getting student: name 'response' is not defined
+2025-05-17 01:12:22,099 - ERROR - Error getting student: name 'response' is not defined
+2025-05-17 01:12:46,359 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 01:13:02,254 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 01:15:26,462 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 01:15:26,530 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 01:15:27,599 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 01:15:27,664 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
+2025-05-17 01:15:36,104 - ERROR - Error getting student: {'code': '22P02', 'details': None, 'hint': None, 'message': 'invalid input syntax for type uuid: "me"'}
