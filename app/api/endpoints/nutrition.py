@@ -11,18 +11,16 @@ def get_my_preferences(request: Request):
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing x-user-id header")
     prefs = mp._load_prefs(user_id)
-    if not prefs:
-        raise HTTPException(status_code=404, detail="No preferences")
-    return {"success": True, "data": prefs}
+    # Return empty data for new users instead of 404
+    return {"success": True, "data": prefs or {}}
 
 @router.get("/meal-preferences/{user_id}")
 def get_preferences_by_user(user_id: str):
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing user_id")
     prefs = mp._load_prefs(user_id)
-    if not prefs:
-        raise HTTPException(status_code=404, detail="No preferences")
-    return {"success": True, "data": prefs}
+    # Return empty data for new users instead of 404
+    return {"success": True, "data": prefs or {}}
 
 @router.post("/meal-preferences", status_code=201)
 def create_preferences(preferences: Dict[str, Any] = Body(default={}), request: Request = None):

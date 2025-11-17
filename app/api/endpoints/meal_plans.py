@@ -210,9 +210,8 @@ def get_preferences(request: Request):
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing x-user-id")
     prefs = _load_prefs(user_id)
-    if not prefs:
-        raise HTTPException(status_code=404, detail="No preferences")
-    return {"preferences": prefs}
+    # Return empty preferences for new users instead of 404
+    return {"preferences": prefs or {}}
 
 @router.post("/preferences", status_code=201)
 def create_preferences(preferences: Dict[str, Any] = Body(default={}), request: Request = None):
@@ -241,9 +240,8 @@ def get_preferences_by_user(user_id: str):
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing userId")
     prefs = _load_prefs(user_id)
-    if not prefs:
-        raise HTTPException(status_code=404, detail="No preferences")
-    return {"preferences": prefs}
+    # Return empty preferences for new users instead of 404
+    return {"preferences": prefs or {}}
 
 def _update_plan_hash(user_id: str, plan_hash: str):
     sb = _client()
