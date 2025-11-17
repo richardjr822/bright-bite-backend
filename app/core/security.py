@@ -11,27 +11,15 @@ from fastapi.security import OAuth2PasswordBearer
 settings = get_settings()
 
 # Password hashing context (bcrypt)
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(
+    schemes=["bcrypt_sha256", "bcrypt"],  # prefer bcrypt_sha256, still accept legacy bcrypt
+    deprecated="auto",
+)
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """
-    Verify a password against a hash.
-    If the hash is not bcrypt (for dev/testing), compare as plain text.
-    """
-    if not hashed_password or not isinstance(hashed_password, str):
-        return False
-    # TEMPORARY: For testing with plaintext passwords
-    if not hashed_password.startswith('$2'):
-        return plain_password == hashed_password
-    # Normal bcrypt verification
-    try:
-        return pwd_context.verify(plain_password, hashed_password)
-    except Exception as e:
-        print(f"Password verification error: {e}")
-        return False
+    return pwd_context.verify(plain_password, hashed_password)
 
 def get_password_hash(password: str) -> str:
-    """Generate a bcrypt hash for the password."""
     return pwd_context.hash(password)
 
 def create_access_token(
