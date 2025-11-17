@@ -1,16 +1,30 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.router import api_router
 from fastapi.staticfiles import StaticFiles
+import os
+
+from app.api.router import api_router
 from app.meal_plans.router import router as meal_plans_router
 
 app = FastAPI(title="BrightBite API", version="1.0.0")
 
 
 # Configure CORS
+# Allow local dev plus production origin(s). Additional origins can be supplied
+# via environment variable CORS_ALLOW_ORIGINS as a comma-separated list.
+default_origins = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:3000",
+    "http://localhost:5000",
+    "https://bright-bite-frontend.vercel.app",
+]
+env_origins = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if o.strip()]
+allow_origins = list(dict.fromkeys(default_origins + env_origins))  # unique, preserve order
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://localhost:3000", "http://localhost:5000"],
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
