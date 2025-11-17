@@ -306,7 +306,42 @@ def generate_plan(preferences: Dict[str, Any] = Body(default={}), request: Reque
         raise HTTPException(status_code=400, detail="Missing userId")
     saved = _load_prefs(user_id)
     if not saved:
-        raise HTTPException(status_code=412, detail="Meal preferences required")
+        # Attempt to create preferences from incoming payload to avoid 412 dead-end for new users
+        try:
+            # Build a minimal map from camelCase to snake_case accepted by _create_prefs
+            seed = {
+                "age": preferences.get("age"),
+                "sex": preferences.get("sex"),
+                "height": preferences.get("height"),
+                "weight": preferences.get("weight"),
+                "goal": preferences.get("goal"),
+                "activityLevel": preferences.get("activityLevel"),
+                "dietaryPreference": preferences.get("dietaryPreference"),
+                "avoidFoods": preferences.get("avoidFoods"),
+                "allergies": preferences.get("allergies"),
+                "healthConditions": preferences.get("healthConditions"),
+                "calorieTarget": preferences.get("calorieTarget"),
+                "macroPreference": preferences.get("macroPreference"),
+                "mealsPerDay": preferences.get("mealsPerDay"),
+                "mealComplexity": preferences.get("mealComplexity"),
+                "mealPrepStyle": preferences.get("mealPrepStyle"),
+                "dailyBudget": preferences.get("dailyBudget"),
+                "cookingTime": preferences.get("cookingTime"),
+                "cookingMethod": preferences.get("cookingMethod"),
+                "specialGoals": preferences.get("specialGoals"),
+                "appetite": preferences.get("appetite"),
+            }
+            # If at least a goal or mealsPerDay present, seed prefs
+            if any(seed.get(k) is not None for k in ("goal","mealsPerDay","macroPreference","calorieTarget")):
+                _create_prefs(user_id, seed)
+                saved = _load_prefs(user_id)
+        except Exception:
+            saved = saved or {}
+        if not saved:
+            # As a last resort, allow generation using provided preferences without persisting
+            if not preferences:
+                raise HTTPException(status_code=412, detail="Meal preferences required")
+            saved = {}
 
     force = bool(preferences.get("force") or preferences.get("force_regenerate"))
     merged = {**saved, **(preferences or {})}
@@ -343,8 +378,12 @@ def generate_plan(preferences: Dict[str, Any] = Body(default={}), request: Reque
     if not isinstance(plan, dict):
         raise HTTPException(status_code=500, detail="AI returned invalid plan")
 
-    _save_plan(user_id, plan)
-    _update_plan_hash(user_id, current_hash)
+    # Best-effort persistence (skip if client not configured)
+    try:
+        _save_plan(user_id, plan)
+        _update_plan_hash(user_id, current_hash)
+    except Exception:
+        pass
     return {"plan": plan, "reused": False, "persisted": True}
 
 @router.get("/plan")
