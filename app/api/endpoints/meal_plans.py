@@ -154,17 +154,17 @@ def _save_plan(user_id: str, plan: Dict[str, List[Dict[str, Any]]] ):
     if not rows:
         return
     try:
-        # Remove previous generated meals for user
+        # Remove previous generated meals for user (ignore failures)
         sb.table(PLAN_TABLE).delete().eq("user_id", user_id).execute()
     except Exception:
-        # table may not exist yet; abort persistence
-        return
+        # table may not exist yet; continue and attempt insert below
+        pass
     try:
         chunk = 500
         for i in range(0, len(rows), chunk):
             sb.table(PLAN_TABLE).insert(rows[i:i+chunk]).execute()
     except Exception:
-        # Ignore partial failures
+        # Ignore partial failures or missing table
         pass
 
 def _load_saved_plan(user_id: str, meals_per_day: int) -> Dict[str, List[Dict[str, Any]]]:
@@ -397,8 +397,9 @@ def get_saved_plan(request: Request):
     meals_per_day = int(prefs.get("meals_per_day", 3) or 3)
     plan = _load_saved_plan(user_id, meals_per_day)
     if not plan or all(len(v) == 0 for v in plan.values()):
-        raise HTTPException(status_code=404, detail="No saved generated plan")
-    return {"plan": plan, "plan_hash": prefs.get("plan_hash")}
+        # Return 200 with empty plan to let clients decide next action (e.g., generate)
+        return {"plan": {}, "plan_hash": prefs.get("plan_hash"), "persisted": False}
+    return {"plan": plan, "plan_hash": prefs.get("plan_hash"), "persisted": True}
 
 # ---------- Routes: Meal Logging ----------
 @router.post("/meals", status_code=201)
