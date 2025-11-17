@@ -2,9 +2,13 @@ from datetime import datetime, timedelta
 from typing import Any, Union, Optional
 from jose import jwt, JWTError
 from passlib.context import CryptContext
-from app.core.config import settings
+from app.core.config import get_settings
+import os
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+
+# Initialize settings
+settings = get_settings()
 
 # Password hashing context (bcrypt)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -41,9 +45,10 @@ def create_access_token(
             minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
         )
     to_encode = {"exp": expire, "sub": str(subject), "type": user_type}
-    encoded_jwt = jwt.encode(
-        to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM
-    )
+    # Prefer JWT_SECRET_KEY if provided to match auth module
+    secret = os.getenv("JWT_SECRET_KEY") or getattr(settings, "SECRET_KEY", None) or "change-me"
+    alg = os.getenv("ALGORITHM") or getattr(settings, "ALGORITHM", None) or "HS256"
+    encoded_jwt = jwt.encode(to_encode, secret, algorithm=alg)
     return encoded_jwt
 
 # OAuth2 scheme for FastAPI dependency
@@ -56,7 +61,10 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        # Decode using same key/alg as auth endpoints
+        secret = os.getenv("JWT_SECRET_KEY") or getattr(settings, "SECRET_KEY", None) or "change-me"
+        alg = os.getenv("ALGORITHM") or getattr(settings, "ALGORITHM", None) or "HS256"
+        payload = jwt.decode(token, secret, algorithms=[alg])
         user_id: str = payload.get("sub")
         if user_id is None:
             raise credentials_exception

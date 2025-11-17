@@ -13,6 +13,7 @@ from email.mime.multipart import MIMEMultipart
 import os
 import sys
 import uuid
+from app.utils.file_upload import save_upload_file
 
 router = APIRouter()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -523,6 +524,10 @@ async def login(request: Request, payload: Optional[dict] = Body(default=None)):
         if not user_data:
             raise HTTPException(status_code=401, detail="Invalid email or password")
         
+        # Block login if vendor application still pending
+        if user_data.get("role") == "pending_vendor":
+            raise HTTPException(status_code=403, detail="Vendor application pending admin approval")
+
         if not pwd_context.verify(password, user_data["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid email or password")
         
@@ -674,38 +679,20 @@ async def vendor_application(
     businessDescription: str = Form(...),
     businessPermit: UploadFile = File(...)
 ):
-    """
-    Handle vendor application submission
-    """
+    """Handle vendor application submission (creates user + vendor profile)."""
     try:
         # Check if email already exists
-        user_check = supabase.table('users').select('*').eq('email', email).execute()
+        user_check = supabase.table('users').select('id').eq('email', email).limit(1).execute()
         if user_check.data:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email already registered"
-            )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
 
-        # Generate a unique filename for the business permit
-        file_extension = os.path.splitext(businessPermit.filename)[1]
-        unique_filename = f"business_permits/{uuid.uuid4()}{file_extension}"
-        
-        # In a real application, you would upload the file to a storage service here
-        # For now, we'll just store the filename
-        
-        # Hash the password
+        # Hash password
         hashed_password = pwd_context.hash(password)
-        
-        # Create user with 'pending_vendor' role
-        # Store additional vendor info in organization field as JSON for now
-        vendor_info = {
-            'businessName': businessName,
-            'businessAddress': businessAddress,
-            'contactNumber': contactNumber,
-            'businessDescription': businessDescription,
-            'businessPermitPath': unique_filename
-        }
-        
+
+        # Save business permit file locally (or could be cloud later)
+        permit_path = await save_upload_file(businessPermit, subfolder="business_permits")
+
+        # Insert user with pending_vendor role
         new_user = {
             'email': email,
             'password_hash': hashed_password,
@@ -714,26 +701,40 @@ async def vendor_application(
             'organization': businessName,
             'created_at': datetime.now(timezone.utc).isoformat()
         }
-        
-        # Insert the new user
-        result = supabase.table('users').insert(new_user).execute()
-        
-        # In a real application, you would send an email to the admin here
-        # and another email to the vendor confirming receipt of their application
-        
-        return {
-            "message": "Vendor application submitted successfully. Please wait for admin approval.",
-            "status": "pending_approval"
+        user_result = supabase.table('users').insert(new_user).execute()
+        if not user_result.data:
+            raise HTTPException(status_code=500, detail="Failed to create user")
+        user_id = user_result.data[0]['id']
+
+        # Insert vendor profile (pending approval)
+        vendor_profile = {
+            'user_id': user_id,
+            'business_name': businessName,
+            'business_address': businessAddress,
+            'contact_number': contactNumber,
+            'business_description': businessDescription,
+            'business_permit_url': permit_path,
+            'approval_status': 'pending',
+            'created_at': datetime.now(timezone.utc).isoformat(),
+            'updated_at': datetime.now(timezone.utc).isoformat()
         }
-        
+        vp_result = supabase.table('vendor_profiles').insert(vendor_profile).execute()
+        if not vp_result.data:
+            # Rollback user if profile fails (best-effort)
+            supabase.table('users').delete().eq('id', user_id).execute()
+            raise HTTPException(status_code=500, detail="Failed to create vendor profile")
+
+        return {
+            "message": "Vendor application submitted successfully. Await admin approval.",
+            "status": "pending_approval",
+            "vendor_profile_id": vp_result.data[0].get('id'),
+            "permit_path": permit_path
+        }
     except HTTPException:
         raise
     except Exception as e:
         print(f"Error in vendor_application: {str(e)}", file=sys.stderr)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to process vendor application"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to process vendor application")
 
 @router.post("/complete-profile")
 async def complete_profile(request: CompleteProfileRequest, req: Request):
@@ -1088,3 +1089,38 @@ async def reset_password(request: dict):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/logout")
+async def logout(req: Request):
+    """
+    Handle user logout
+    While JWT is stateless and can't be truly invalidated without a blacklist,
+    this endpoint serves as a logging point and can be extended for token blacklisting
+    """
+    try:
+        # Get token from Authorization header
+        auth_header = req.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.replace("Bearer ", "")
+            try:
+                payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+                user_id = payload.get("sub")
+                email = payload.get("email")
+                
+                # Log the logout activity
+                print(f"✅ User logged out: {email} (ID: {user_id})", file=sys.stderr)
+                
+                # Update last activity timestamp
+                supabase.table("users").update({
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", user_id).execute()
+                
+            except jwt.JWTError:
+                pass  # Invalid token, but still allow logout
+        
+        return {"message": "Logout successful"}
+        
+    except Exception as e:
+        print(f"❌ Logout error: {str(e)}", file=sys.stderr)
+        # Even if there's an error, return success to allow client-side cleanup
+        return {"message": "Logout successful"}

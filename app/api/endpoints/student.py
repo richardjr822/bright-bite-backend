@@ -5,11 +5,17 @@ import os
 from jose import jwt, JWTError
 import sys
 import uuid
+import asyncio
 
 try:
     from app.db.database import supabase
 except Exception:
     supabase = None
+
+try:
+    from app.api.endpoints.realtime import broadcast_order_event
+except Exception:
+    broadcast_order_event = None
 
 router = APIRouter(prefix="/student", tags=["student"])
 
@@ -95,6 +101,7 @@ def get_profile(request: Request):
             "full_name": user.get("full_name") or "",
             "email": user.get("email") or "",
             "organization": user.get("organization") or profile.get("organization_name") or "",
+            "phone": user.get("phone") or "",
         },
         "profile": {
             "organization_name": profile.get("organization_name") or user.get("organization") or "",
@@ -112,6 +119,10 @@ def update_profile(request: Request, payload: Dict[str, Any] = Body(default={}))
 
     full_name = (payload.get("fullName") or payload.get("full_name") or "").strip()
     organization = (payload.get("organization") or payload.get("organization_name") or "").strip()
+    phone = (payload.get("phone") or "").strip()
+    # Optional basic normalization: remove spaces
+    if phone:
+        phone = phone.replace(" ", "")
 
     sb = _client()
     if not sb:
@@ -124,6 +135,8 @@ def update_profile(request: Request, payload: Dict[str, Any] = Body(default={}))
             update_user["full_name"] = full_name
         if organization != "":
             update_user["organization"] = organization
+        if phone != "":
+            update_user["phone"] = phone
         if update_user:
             sb.table("users").update(update_user).eq("id", user_id).execute()
     except Exception:
@@ -158,6 +171,7 @@ def update_profile(request: Request, payload: Dict[str, Any] = Body(default={}))
             "full_name": user.get("full_name") or full_name,
             "email": user.get("email") or "",
             "organization": user.get("organization") or organization,
+            "phone": user.get("phone") or phone,
         },
         "profile": {
             "organization_name": prof.get("organization_name") or organization,
@@ -185,7 +199,7 @@ ORDER_STATUS = {
 
 
 @router.post("/orders")
-def create_order(request: Request, payload: Dict[str, Any] = Body(default={})):  # type: ignore[no-redef]
+async def create_order(request: Request, payload: Dict[str, Any] = Body(default={})):  # type: ignore[no-redef]
     user_id = _get_user_id(request, payload)
     if not user_id:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -216,22 +230,29 @@ def create_order(request: Request, payload: Dict[str, Any] = Body(default={})): 
     # Generate a unique, human-friendly order code
     order_code = f"BB-{uuid.uuid4().hex[:8].upper()}"
 
-    # Promotions metadata (deal/voucher) stored under rider.promos for now
+    # Promotions metadata (deal/voucher) stored directly on order (rider removed)
     applied_deal_id = payload.get("appliedDealId") or None
     discount_amount = float(payload.get("discountAmount") or 0)
     voucher_code = payload.get("voucherCode") or None
+    # Fulfillment: persist requested service type to fix vendor pickup/delivery mismatch
+    service_type = (payload.get("serviceType") or payload.get("fulfillment") or "").strip().lower()
+    if service_type not in {"delivery", "pickup"}:
+        service_type = None
     promos = None
     try:
         original_subtotal = float(total + discount_amount)
     except Exception:
         original_subtotal = float(total)
-    if applied_deal_id or voucher_code or discount_amount > 0:
+    # Always include promos when we need to carry metadata like fulfillment
+    if applied_deal_id or voucher_code or discount_amount > 0 or service_type:
         promos = {
             "appliedDealId": applied_deal_id,
             "voucherCode": voucher_code,
             "discountAmount": discount_amount,
             "originalSubtotal": original_subtotal,
         }
+        if service_type:
+            promos["fulfillment"] = service_type
 
     row = {
         "user_id": user_id,
@@ -241,10 +262,12 @@ def create_order(request: Request, payload: Dict[str, Any] = Body(default={})): 
         "payment_method": payment_method,
         "order_code": order_code,
         "status": ORDER_STATUS["PENDING_CONFIRMATION"],
-        "rider": {"promos": promos} if promos else None,
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
     }
+    # Only include promos key if column exists (avoid 500 when column missing)
+    if promos:
+        row["promos"] = promos
 
     try:
         res = sb.table("orders").insert(row).execute()
@@ -255,6 +278,25 @@ def create_order(request: Request, payload: Dict[str, Any] = Body(default={})): 
             print(f"create_order insert error: {err_msg}", file=sys.stderr)
             raise HTTPException(status_code=500, detail=f"Failed to create order: {err_msg}")
         created = data[0]
+
+        # Broadcast order creation with snapshot
+        if broadcast_order_event:
+            try:
+                await broadcast_order_event({
+                    "type": "order_created",
+                    "order_id": created.get("id"),
+                    "db_status": created.get("status"),
+                    "vendor_id": restaurant_id,
+                    "user_id": user_id,
+                    "order": {
+                        "items": created.get("items") or [],
+                        "total": float(created.get("total", 0) or 0),
+                        "created_at": created.get("created_at"),
+                    }
+                })
+            except Exception as be:
+                print(f"Broadcast create_order failed: {be}", file=sys.stderr)
+
         return {
             "success": True,
             "order": {
@@ -263,6 +305,8 @@ def create_order(request: Request, payload: Dict[str, Any] = Body(default={})): 
                 "items": created.get("items") or [],
                 "total": float(created.get("total", 0)),
                 "created_at": created.get("created_at"),
+                # Echo serviceType back for immediate UI context
+                "serviceType": service_type or None,
             }
         }
     except HTTPException:
@@ -296,11 +340,25 @@ def get_order(request: Request, order_id: str):
     if not sb:
         raise HTTPException(status_code=500, detail="Database client unavailable")
     try:
-        res = sb.table("orders").select("id, items, total, status, restaurant_id, created_at, updated_at").eq("id", order_id).eq("user_id", user_id).limit(1).execute()
+        res = sb.table("orders").select("id, items, total, status, restaurant_id, created_at, updated_at, assigned_staff_id").eq("id", order_id).eq("user_id", user_id).limit(1).execute()
         rows = getattr(res, "data", []) or []
         if not rows:
             raise HTTPException(status_code=404, detail="Order not found")
-        return {"order": rows[0]}
+        order = rows[0]
+        # attach delivery staff info if assigned
+        if order.get("assigned_staff_id"):
+            try:
+                ds_res = sb.table("delivery_staff").select("id, user_id, phone").eq("id", order.get("assigned_staff_id")).limit(1).execute()
+                if ds_res.data:
+                    ds = ds_res.data[0]
+                    ures = sb.table("users").select("full_name").eq("id", ds.get("user_id")).limit(1).execute()
+                    order["delivery_staff"] = {
+                        "full_name": (ures.data or [{}])[0].get("full_name"),
+                        "phone": ds.get("phone"),
+                    }
+            except Exception:
+                pass
+        return {"order": order}
     except HTTPException:
         raise
     except Exception as e:
