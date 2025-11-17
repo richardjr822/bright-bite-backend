@@ -229,8 +229,10 @@ def patch_preferences(preferences: Dict[str, Any] = Body(default={}), request: R
     user_id = (preferences or {}).get("userId") or (request.headers.get("x-user-id") if request else None)
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing userId")
+    # Upsert: if none exist, create; else patch
     if not _load_prefs(user_id):
-        raise HTTPException(status_code=404, detail="No preferences to update")
+        created = _create_prefs(user_id, preferences or {})
+        return {"preferences": created}
     updated = _patch_prefs(user_id, preferences or {})
     return {"preferences": updated}
 
@@ -243,6 +245,34 @@ def get_preferences_by_user(user_id: str):
     # Return empty preferences for new users instead of 404
     return {"preferences": prefs or {}}
 
+# ---------- Legacy alias: /api/meal-preferences/{user_id} ----------
+from fastapi import APIRouter as _APIRouter
+
+legacy_router = _APIRouter(prefix="/meal-preferences", tags=["meal-preferences-legacy"])
+
+@legacy_router.get("/{user_id}")
+def legacy_get_prefs(user_id: str):
+    return get_preferences_by_user(user_id)
+
+@legacy_router.put("/{user_id}")
+def legacy_put_prefs(user_id: str, body: Dict[str, Any] = Body(default={})):
+    # Accept old payloads and upsert
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing userId")
+    if not _load_prefs(user_id):
+        created = _create_prefs(user_id, body or {})
+        return {"preferences": created}
+    updated = _patch_prefs(user_id, body or {})
+    return {"preferences": updated}
+
+# Expose both routers under this module's `router`
+combined_router = _APIRouter()
+combined_router.include_router(router)          # /meal-plans/...
+combined_router.include_router(legacy_router)   # /meal-preferences/...
+
+router = combined_router
+
+# ---------- Plan Generation & Logging Routes ----------
 def _update_plan_hash(user_id: str, plan_hash: str):
     sb = _client()
     if not sb: return

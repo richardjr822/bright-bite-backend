@@ -5,7 +5,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import os
 from fastapi.staticfiles import StaticFiles
 from app.api.router import api_router
-from app.meal_plans.router import router as meal_plans_router
 
 app = FastAPI()
 
@@ -43,9 +42,8 @@ class UploadsCacheMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(UploadsCacheMiddleware)
 
-# Include API router with /api prefix
+# Mount only the unified API router at /api
 app.include_router(api_router, prefix="/api")
-app.include_router(meal_plans_router, prefix="/api")
 
 # Serve uploaded assets
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
