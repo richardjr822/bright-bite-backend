@@ -3,10 +3,8 @@ services:
     name: brightbite-backend
     env: python
     region: singapore
-    buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port 5000
+    buildCommand: pip install --upgrade pip setuptools wheel && PIP_ONLY_BINARY="pydantic-core,pillow,cryptography" pip install --prefer-binary --no-cache-dir -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
-      - key: PIP_ONLY_BINARY
-        value: pillow
