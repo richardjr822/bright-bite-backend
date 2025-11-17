@@ -10,6 +10,7 @@ import random
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import socket
 import os
 import sys
 import uuid
@@ -25,11 +26,73 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 7
 
 # Email configuration
+EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "smtp").lower()  # smtp | resend
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "brightbite.gc@gmail.com")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "tmty tdqn ynsb lurr")
 SENDER_EMAIL = os.getenv("SENDER_EMAIL", "brightbite.gc@gmail.com")
+SMTP_TIMEOUT = int(os.getenv("SMTP_TIMEOUT", "10"))  # seconds
+
+# Resend (or other HTTP) provider
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+RESEND_FROM = os.getenv("RESEND_FROM", "BrightBite <no-reply@yourdomain.com>")
+
+def _send_email_smtp(message: MIMEMultipart) -> bool:
+    try:
+        # Use timeout to avoid long hangs on network issues
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=SMTP_TIMEOUT) as server:
+            server.ehlo()
+            if SMTP_PORT == 587:
+                server.starttls()
+                server.ehlo()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(message)
+        return True
+    except (socket.timeout, smtplib.SMTPException, OSError) as e:
+        print(f"❌ SMTP send error: {e}", file=sys.stderr)
+        return False
+
+def _send_email_resend(to_email: str, subject: str, html: str) -> bool:
+    try:
+        if not RESEND_API_KEY:
+            print("❌ RESEND_API_KEY missing", file=sys.stderr)
+            return False
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": RESEND_FROM,
+                "to": to_email,
+                "subject": subject,
+                "html": html,
+            },
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            return True
+        print(f"❌ Resend error: {resp.status_code} {resp.text}", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"❌ Resend exception: {e}", file=sys.stderr)
+        return False
+
+def _send_email(to_email: str, subject: str, html: str) -> bool:
+    # Build a minimal MIME for SMTP path
+    message = MIMEMultipart("alternative")
+    message["Subject"] = subject
+    message["From"] = f"BrightBite <{SENDER_EMAIL}>"
+    message["To"] = to_email
+    part = MIMEText(html, "html")
+    message.attach(part)
+
+    if EMAIL_PROVIDER == "resend":
+        return _send_email_resend(to_email, subject, html)
+    # default to smtp
+    return _send_email_smtp(message)
 
 # ===== MODELS =====
 class SendOTPRequest(BaseModel):
@@ -112,13 +175,8 @@ def create_access_token(data: dict):
 
 # ===== EMAIL TEMPLATES =====
 async def send_registration_otp_email(email: str, name: str, otp: str):
-    """Send OTP email for registration"""
+    """Send OTP email for registration (non-blocking in BackgroundTasks)."""
     try:
-        message = MIMEMultipart("alternative")
-        message["Subject"] = "🎉 Welcome to BrightBite - Verify Your Email"
-        message["From"] = f"BrightBite <{SENDER_EMAIL}>"
-        message["To"] = email
-
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -215,29 +273,20 @@ async def send_registration_otp_email(email: str, name: str, otp: str):
         </body>
         </html>
         """
-
-        part = MIMEText(html, "html")
-        message.attach(part)
-
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(message)
-        
-        print(f"✅ Registration OTP sent to {email}", file=sys.stderr)
-        return True
+        ok = _send_email(email, "🎉 Welcome to BrightBite - Verify Your Email", html)
+        if ok:
+            print(f"✅ Registration OTP sent to {email}", file=sys.stderr)
+            return True
+        else:
+            print(f"❌ Failed to send registration OTP via provider {EMAIL_PROVIDER}", file=sys.stderr)
+            return False
     except Exception as e:
         print(f"❌ Failed to send registration OTP: {e}", file=sys.stderr)
         return False
 
 async def send_password_reset_otp_email(email: str, name: str, otp: str):
-    """Send OTP email for password reset"""
+    """Send OTP email for password reset (non-blocking)."""
     try:
-        message = MIMEMultipart("alternative")
-        message["Subject"] = "🔐 BrightBite Password Reset"
-        message["From"] = f"BrightBite <{SENDER_EMAIL}>"
-        message["To"] = email
-
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -347,17 +396,13 @@ async def send_password_reset_otp_email(email: str, name: str, otp: str):
         </body>
         </html>
         """
-
-        part = MIMEText(html, "html")
-        message.attach(part)
-
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(message)
-        
-        print(f"✅ Password reset OTP sent to {email}", file=sys.stderr)
-        return True
+        ok = _send_email(email, "🔐 BrightBite Password Reset", html)
+        if ok:
+            print(f"✅ Password reset OTP sent to {email}", file=sys.stderr)
+            return True
+        else:
+            print(f"❌ Failed to send password reset OTP via provider {EMAIL_PROVIDER}", file=sys.stderr)
+            return False
     except Exception as e:
         print(f"❌ Failed to send password reset OTP: {e}", file=sys.stderr)
         return False
