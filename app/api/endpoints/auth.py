@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status, Request, BackgroundTasks, UploadFile, File, Form, Body
+from fastapi import APIRouter, HTTPException, status, Request, BackgroundTasks, UploadFile, File, Form, Body, Depends
 from pydantic import BaseModel, EmailStr, Field
 from app.db.database import supabase
 from passlib.context import CryptContext
@@ -14,6 +14,7 @@ import os
 import sys
 import uuid
 from app.utils.file_upload import save_upload_file
+from app.core.security import get_current_user, verify_password, get_password_hash
 
 router = APIRouter()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -80,6 +81,10 @@ class LoginResponse(BaseModel):
     token: str
     user: UserResponse
     message: str
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 # Add this new model after GoogleAuthRequest
 class CompleteProfileRequest(BaseModel):
@@ -1085,6 +1090,33 @@ async def reset_password(request: dict):
         supabase.table("otp_codes").delete().eq("email", email).execute()
         
         return {"message": "Password reset successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/change-password")
+async def change_password(body: ChangePasswordRequest, current_user = Depends(get_current_user)):
+    """Change password for the currently authenticated user using their current password."""
+    try:
+        user_id = current_user.get("sub") if isinstance(current_user, dict) else None
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        # Fetch user row
+        user_res = supabase.table("users").select("id, password_hash").eq("id", user_id).limit(1).execute()
+        if not user_res.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        row = user_res.data[0]
+        if not verify_password(body.current_password, row.get("password_hash") or ""):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+        new_hash = pwd_context.hash(body.new_password)
+        upd = supabase.table("users").update({
+            "password_hash": new_hash,
+            "updated_at": datetime.utcnow().isoformat()
+        }).eq("id", user_id).execute()
+        if not upd.data:
+            raise HTTPException(status_code=500, detail="Failed to update password")
+        return {"message": "Password updated successfully"}
     except HTTPException:
         raise
     except Exception as e:
