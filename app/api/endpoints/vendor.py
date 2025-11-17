@@ -11,11 +11,17 @@ from app.core.security import get_password_hash, get_current_user
 import secrets
 import string
 import os
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import requests
+import time
+import resend
 
 router = APIRouter()
+
+# Configure Resend SDK
+try:
+    resend.api_key = os.getenv("RESEND_API_KEY", "")
+except Exception:
+    pass
 
 # ==================== MODELS ====================
 
@@ -717,81 +723,62 @@ async def assign_order_to_staff(order_id: str, body: AssignOrderBody, current=De
 
 
 def _send_delivery_staff_welcome_email(
-        to_email: str,
-        staff_name: str,
-        staff_id: str,
-        initial_password: str,
+    to_email: str,
+    staff_name: str,
+    staff_id: str,
+    initial_password: str,
 ):
-        """Send a welcome email with initial credentials to the new delivery staff."""
-        try:
-                SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-                SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-                SMTP_USERNAME = os.getenv("SMTP_USERNAME")
-                SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-                SENDER_EMAIL = os.getenv("SENDER_EMAIL") or SMTP_USERNAME or "no-reply@brightbite.local"
-
-                if not (SMTP_USERNAME and SMTP_PASSWORD):
-                        print("SMTP credentials not configured; skipping welcome email.", file=sys.stderr)
-                        return False
-
-                subject = "Welcome to BrightBite Delivery"
-                html = f"""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset=\"UTF-8\" />
-                    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
-                    <style>
-                        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; background:#f7f7f8; padding:20px; }}
-                        .card {{ max-width:640px; margin:0 auto; background:#ffffff; border-radius:16px; overflow:hidden; box-shadow:0 10px 30px rgba(0,0,0,0.08); }}
-                        .header {{ background:linear-gradient(135deg,#14b8a6,#0ea5e9); color:#fff; padding:28px 24px; }}
-                        .title {{ margin:0; font-size:22px; font-weight:800; }}
-                        .content {{ padding:24px; color:#111827; }}
-                        .muted {{ color:#4b5563; }}
-                        .box {{ background:#f8fafc; border:1px dashed #cbd5e1; border-radius:12px; padding:16px; margin:16px 0; }}
-                        .code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight:700; }}
-                        .footer {{ background:#f9fafb; padding:16px; text-align:center; color:#6b7280; font-size:12px; }}
-                    </style>
-                </head>
-                <body>
-                    <div class=\"card\"> 
-                        <div class=\"header\">
-                            <h1 class=\"title\">Welcome to BrightBite Delivery</h1>
-                        </div>
-                        <div class=\"content\">
-                            <p>Hi {staff_name},</p>
-                            <p class=\"muted\">Your delivery staff account has been created by your vendor. Use the credentials below to sign in and you will be asked to change your password on first login.</p>
-                            <div class=\"box\">
-                                <p><strong>Staff ID</strong>: <span class=\"code\">{staff_id}</span></p>
-                                <p><strong>Login Email</strong>: <span class=\"code\">{to_email}</span></p>
-                                <p><strong>Temporary Password</strong>: <span class=\"code\">{initial_password}</span></p>
-                            </div>
-                            <p class=\"muted\">Sign in at: http://localhost:5173/login</p>
-                            <p class=\"muted\">For security, do not share this email. If you did not expect this account, please notify your vendor immediately.</p>
-                        </div>
-                        <div class=\"footer\">© {datetime.now(timezone.utc).year} BrightBite. All rights reserved.</div>
-                    </div>
-                </body>
-                </html>
-                """
-
-                message = MIMEMultipart("alternative")
-                message["Subject"] = subject
-                # Use the authenticated SMTP username as From to avoid provider rejections
-                message["From"] = f"BrightBite <{SMTP_USERNAME}>"
-                message["To"] = to_email
-                message.attach(MIMEText(html, "html"))
-
-                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-                        server.starttls()
-                        server.login(SMTP_USERNAME, SMTP_PASSWORD)
-                        server.send_message(message)
-
-                print(f"✅ Welcome email sent to {to_email}", file=sys.stderr)
-                return True
-        except Exception as e:
-                print(f"❌ Failed to send welcome email to {to_email}: {e}", file=sys.stderr)
-                return False
+    """Send delivery staff welcome email via Resend (SMTP removed)."""
+    try:
+        RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+        RESEND_FROM = os.getenv("RESEND_FROM", "BrightBite <no-reply@brightbite.com>")
+        if not RESEND_API_KEY:
+            print("Resend API key missing; skipping welcome email", file=sys.stderr)
+            return False
+        subject = "Welcome to BrightBite Delivery"
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1.0'>
+        <style>body {{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;background:#f7f7f8;padding:20px;}}.card {{max-width:640px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,0.08);}}.header {{background:linear-gradient(135deg,#14b8a6,#0ea5e9);color:#fff;padding:28px 24px;}}.title {{margin:0;font-size:22px;font-weight:800;}}.content {{padding:24px;color:#111827;}}.muted {{color:#4b5563;}}.box {{background:#f8fafc;border:1px dashed #cbd5e1;border-radius:12px;padding:16px;margin:16px 0;}}.code {{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;}}.footer {{background:#f9fafb;padding:16px;text-align:center;color:#6b7280;font-size:12px;}}</style>
+        </head>
+        <body>
+        <div class='card'>
+          <div class='header'><h1 class='title'>Welcome to BrightBite Delivery</h1></div>
+          <div class='content'>
+            <p>Hi {staff_name},</p>
+            <p class='muted'>Your delivery staff account has been created by your vendor. Use the credentials below to sign in and you will be asked to change your password on first login.</p>
+            <div class='box'>
+              <p><strong>Staff ID</strong>: <span class='code'>{staff_id}</span></p>
+              <p><strong>Login Email</strong>: <span class='code'>{to_email}</span></p>
+              <p><strong>Temporary Password</strong>: <span class='code'>{initial_password}</span></p>
+            </div>
+            <p class='muted'>Sign in at: http://localhost:5173/login</p>
+            <p class='muted'>If you did not expect this account, notify your vendor immediately.</p>
+          </div>
+          <div class='footer'>© {datetime.now(timezone.utc).year} BrightBite. All rights reserved.</div>
+        </div>
+        </body></html>
+        """
+        for attempt in range(1, 3):  # 2 attempts
+            try:
+                resp = requests.post(
+                    "https://api.resend.com/emails",
+                    headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                    json={"from": RESEND_FROM, "to": to_email, "subject": subject, "html": html},
+                    timeout=10,
+                )
+                if resp.status_code in (200, 201):
+                    print(f"✅ Welcome email sent to {to_email}", file=sys.stderr)
+                    return True
+                print(f"❌ Resend welcome email error attempt {attempt} {resp.status_code}: {resp.text}", file=sys.stderr)
+            except Exception as e:
+                print(f"❌ Resend welcome email exception attempt {attempt}: {e}", file=sys.stderr)
+            time.sleep(0.5)
+        return False
+    except Exception as e:
+        print(f"❌ Failed to send welcome email to {to_email}: {e}", file=sys.stderr)
+        return False
 
 # ==================== MENU MANAGEMENT ====================
 

@@ -17,7 +17,11 @@ pwd_context = CryptContext(
 )
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception:
+        # If hash format is unrecognized or corrupted, treat as non-match
+        return False
 
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)

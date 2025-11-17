@@ -1,98 +1,95 @@
 from fastapi import APIRouter, HTTPException, status, Request, BackgroundTasks, UploadFile, File, Form, Body, Depends
 from pydantic import BaseModel, EmailStr, Field
 from app.db.database import supabase
-from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
 from jose import jwt
 from typing import Optional, List
 import requests
 import random
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-import socket
+import time
 import os
 import sys
 import uuid
 from app.utils.file_upload import save_upload_file
 from app.core.security import get_current_user, verify_password, get_password_hash
+import resend
 
 router = APIRouter()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # JWT Configuration
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 7
 
-# Email configuration
-EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "smtp").lower()  # smtp | resend
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USERNAME = os.getenv("SMTP_USERNAME", "brightbite.gc@gmail.com")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "tmty tdqn ynsb lurr")
-SENDER_EMAIL = os.getenv("SENDER_EMAIL", "brightbite.gc@gmail.com")
-SMTP_TIMEOUT = int(os.getenv("SMTP_TIMEOUT", "10"))  # seconds
-
-# Resend (or other HTTP) provider
+# Resend email provider configuration (SMTP removed)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM = os.getenv("RESEND_FROM", "BrightBite <no-reply@yourdomain.com>")
+OTP_RATE_LIMIT_WINDOW = int(os.getenv("OTP_RATE_LIMIT_WINDOW_SECONDS", "60"))
+OTP_RATE_LIMIT_MAX = int(os.getenv("OTP_RATE_LIMIT_MAX", "3"))
+OTP_RESEND_COOLDOWN = int(os.getenv("OTP_RESEND_COOLDOWN_SECONDS", "30"))
+DISABLE_OTP = str(os.getenv("DISABLE_OTP", "false")).lower() in ("1", "true", "yes")
 
-def _send_email_smtp(message: MIMEMultipart) -> bool:
-    try:
-        # Use timeout to avoid long hangs on network issues
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=SMTP_TIMEOUT) as server:
-            server.ehlo()
-            if SMTP_PORT == 587:
-                server.starttls()
-                server.ehlo()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(message)
-        return True
-    except (socket.timeout, smtplib.SMTPException, OSError) as e:
-        print(f"❌ SMTP send error: {e}", file=sys.stderr)
-        return False
+# In-memory rate tracking (per-process)
+_otp_send_state = {}
+
+# Configure Resend SDK (also refetched per call inside sender for reliability)
+try:
+    resend.api_key = os.getenv("RESEND_API_KEY", "")
+except Exception:
+    pass
+
+def _can_send_otp(email: str) -> None:
+    """Raise HTTPException if rate limit exceeded or resend cooldown active."""
+    now = time.time()
+    state = _otp_send_state.get(email, {"events": []})
+    # Prune old events
+    state["events"] = [t for t in state["events"] if now - t < OTP_RATE_LIMIT_WINDOW]
+    if state["events"] and now - state["events"][-1] < OTP_RESEND_COOLDOWN:
+        remaining = int(OTP_RESEND_COOLDOWN - (now - state["events"][-1]))
+        raise HTTPException(status_code=429, detail=f"Please wait {remaining}s before requesting another code")
+    if len(state["events"]) >= OTP_RATE_LIMIT_MAX:
+        raise HTTPException(status_code=429, detail="Too many OTP requests, try later")
+    # Record event
+    state["events"].append(now)
+    _otp_send_state[email] = state
 
 def _send_email_resend(to_email: str, subject: str, html: str) -> bool:
-    try:
-        if not RESEND_API_KEY:
-            print("❌ RESEND_API_KEY missing", file=sys.stderr)
-            return False
-        resp = requests.post(
-            "https://api.resend.com/emails",
-            headers={
-                "Authorization": f"Bearer {RESEND_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "from": RESEND_FROM,
-                "to": to_email,
-                "subject": subject,
-                "html": html,
-            },
-            timeout=10,
-        )
-        if resp.status_code in (200, 201):
-            return True
-        print(f"❌ Resend error: {resp.status_code} {resp.text}", file=sys.stderr)
+    """Send email via Resend with simple retry/backoff.
+    Re-fetch the API key each call so .env updates apply without restart.
+    """
+    api_key = os.getenv("RESEND_API_KEY", "")
+    if not api_key:
+        print("❌ RESEND_API_KEY missing", file=sys.stderr)
         return False
-    except Exception as e:
-        print(f"❌ Resend exception: {e}", file=sys.stderr)
-        return False
+    attempts = 0
+    while attempts < 2:  # 1 retry
+        attempts += 1
+        try:
+            resp = requests.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "from": RESEND_FROM,
+                    "to": to_email,
+                    "subject": subject,
+                    "html": html,
+                },
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                return True
+            print(f"❌ Resend error attempt {attempts}: {resp.status_code} {resp.text}", file=sys.stderr)
+        except Exception as e:
+            print(f"❌ Resend exception attempt {attempts}: {e}", file=sys.stderr)
+        time.sleep(0.5)
+    return False
 
 def _send_email(to_email: str, subject: str, html: str) -> bool:
-    # Build a minimal MIME for SMTP path
-    message = MIMEMultipart("alternative")
-    message["Subject"] = subject
-    message["From"] = f"BrightBite <{SENDER_EMAIL}>"
-    message["To"] = to_email
-    part = MIMEText(html, "html")
-    message.attach(part)
-
-    if EMAIL_PROVIDER == "resend":
-        return _send_email_resend(to_email, subject, html)
-    # default to smtp
-    return _send_email_smtp(message)
+    """Send email using Resend only (SMTP removed)."""
+    return _send_email_resend(to_email, subject, html)
 
 # ===== MODELS =====
 class SendOTPRequest(BaseModel):
@@ -278,7 +275,7 @@ async def send_registration_otp_email(email: str, name: str, otp: str):
             print(f"✅ Registration OTP sent to {email}", file=sys.stderr)
             return True
         else:
-            print(f"❌ Failed to send registration OTP via provider {EMAIL_PROVIDER}", file=sys.stderr)
+            print(f"❌ Failed to send registration OTP via Resend", file=sys.stderr)
             return False
     except Exception as e:
         print(f"❌ Failed to send registration OTP: {e}", file=sys.stderr)
@@ -401,7 +398,7 @@ async def send_password_reset_otp_email(email: str, name: str, otp: str):
             print(f"✅ Password reset OTP sent to {email}", file=sys.stderr)
             return True
         else:
-            print(f"❌ Failed to send password reset OTP via provider {EMAIL_PROVIDER}", file=sys.stderr)
+            print(f"❌ Failed to send password reset OTP via Resend", file=sys.stderr)
             return False
     except Exception as e:
         print(f"❌ Failed to send password reset OTP: {e}", file=sys.stderr)
@@ -411,9 +408,16 @@ async def send_password_reset_otp_email(email: str, name: str, otp: str):
 @router.post("/send-otp", response_model=OTPResponse)
 async def send_otp(request: SendOTPRequest, background_tasks: BackgroundTasks):
     try:
+        if DISABLE_OTP:
+            return OTPResponse(
+                message="Verification disabled",
+                email=request.email,
+                expires_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+            )
         existing_user = supabase.table("users").select("email").eq("email", request.email).execute()
         if existing_user.data:
             raise HTTPException(status_code=400, detail="Email already registered")
+        _can_send_otp(request.email)
         
         otp = ''.join([str(random.randint(0, 9)) for _ in range(6)])
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
@@ -446,6 +450,8 @@ async def send_otp(request: SendOTPRequest, background_tasks: BackgroundTasks):
 @router.post("/verify-otp")
 async def verify_otp(request: VerifyOTPRequest):
     try:
+        if DISABLE_OTP:
+            return {"message": "Email verification bypassed", "verified": True}
         otp_record = supabase.table("otp_codes")\
             .select("*")\
             .eq("email", request.email)\
@@ -474,20 +480,20 @@ async def verify_otp(request: VerifyOTPRequest):
 @router.post("/complete-registration")
 async def complete_registration(request: CompleteRegistrationRequest):
     try:
-        otp_record = supabase.table("otp_codes")\
-            .select("*")\
-            .eq("email", request.email)\
-            .eq("verified", True)\
-            .execute()
-        
-        if not otp_record.data:
-            raise HTTPException(status_code=400, detail="Email not verified")
+        if not DISABLE_OTP:
+            otp_record = supabase.table("otp_codes")\
+                .select("*")\
+                .eq("email", request.email)\
+                .eq("verified", True)\
+                .execute()
+            if not otp_record.data:
+                raise HTTPException(status_code=400, detail="Email not verified")
         
         existing_user = supabase.table("users").select("email").eq("email", request.email).execute()
         if existing_user.data:
             raise HTTPException(status_code=400, detail="Email already registered")
         
-        password_hash = pwd_context.hash(request.password)
+        password_hash = get_password_hash(request.password)
         
         user_data = {
             "email": request.email,
@@ -504,7 +510,8 @@ async def complete_registration(request: CompleteRegistrationRequest):
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to create account")
         
-        supabase.table("otp_codes").delete().eq("email", request.email).execute()
+        if not DISABLE_OTP:
+            supabase.table("otp_codes").delete().eq("email", request.email).execute()
         
         return {
             "message": "Registration completed successfully",
@@ -528,7 +535,7 @@ async def register(user: UserRegister):
         if existing.data:
             raise HTTPException(status_code=409, detail="Email already registered")
         
-        password_hash = pwd_context.hash(user.password)
+        password_hash = get_password_hash(user.password)
         
         result = supabase.table("users").insert({
             "email": user.email,
@@ -578,7 +585,7 @@ async def login(request: Request, payload: Optional[dict] = Body(default=None)):
         if user_data.get("role") == "pending_vendor":
             raise HTTPException(status_code=403, detail="Vendor application pending admin approval")
 
-        if not pwd_context.verify(password, user_data["password_hash"]):
+        if not verify_password(password, user_data["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid email or password")
         
         # Generate JWT token
@@ -664,7 +671,7 @@ async def google_login(payload: GoogleAuthRequest):
             new_user_data = {
                 "email": payload.email,
                 "full_name": payload.name,
-                "password_hash": pwd_context.hash(os.urandom(32).hex()),  # Random password
+                "password_hash": get_password_hash(os.urandom(32).hex()),  # Random password
                 "role": "student",
                 "organization": None,  # Changed from "Google Account" to None
                 "agreed_to_terms": False,  # Changed from True to False
@@ -737,7 +744,7 @@ async def vendor_application(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
 
         # Hash password
-        hashed_password = pwd_context.hash(password)
+        hashed_password = get_password_hash(password)
 
         # Save business permit file locally (or could be cloud later)
         permit_path = await save_upload_file(businessPermit, subfolder="business_permits")
@@ -904,10 +911,17 @@ async def check_email(request: dict):
 @router.post("/send-reset-otp")
 async def send_reset_otp(request: SendOTPRequest, background_tasks: BackgroundTasks):
     try:
+        if DISABLE_OTP:
+            return OTPResponse(
+                message="Password reset verification disabled",
+                email=request.email,
+                expires_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+            )
         user = supabase.table("users").select("email, full_name").eq("email", request.email).execute()
         
         if not user.data:
             raise HTTPException(status_code=404, detail="Email not found")
+        _can_send_otp(request.email)
         
         user_name = user.data[0].get("full_name", "User")
         otp = ''.join([str(random.randint(0, 9)) for _ in range(6)])
@@ -940,7 +954,42 @@ async def send_reset_otp(request: SendOTPRequest, background_tasks: BackgroundTa
 
 @router.post("/verify-reset-otp")
 async def verify_reset_otp(request: VerifyOTPRequest):
+    if DISABLE_OTP:
+        return {"message": "Password reset verification bypassed", "verified": True}
     return await verify_otp(request)
+
+@router.post("/resend-otp", response_model=OTPResponse)
+async def resend_otp(request: SendOTPRequest, background_tasks: BackgroundTasks):
+    """Resend registration OTP (only if not yet registered). Rate limited."""
+    try:
+        if DISABLE_OTP:
+            return OTPResponse(
+                message="Verification disabled",
+                email=request.email,
+                expires_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+            )
+        existing_user = supabase.table("users").select("email").eq("email", request.email).execute()
+        if existing_user.data:
+            raise HTTPException(status_code=400, detail="Email already registered")
+        _can_send_otp(request.email)
+        otp = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        otp_data = {
+            "email": request.email,
+            "otp": otp,
+            "expires_at": expires_at.isoformat(),
+            "verified": False,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        supabase.table("otp_codes").delete().eq("email", request.email).execute()
+        supabase.table("otp_codes").insert(otp_data).execute()
+        background_tasks.add_task(send_registration_otp_email, request.email, request.name, otp)
+        print(f"🔄 Resent OTP: {otp}", file=sys.stderr)
+        return OTPResponse(message="Verification code resent", email=request.email, expires_at=expires_at.isoformat())
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/pending-vendors", response_model=List[dict])
 async def get_pending_vendors(req: Request):
@@ -1105,24 +1154,21 @@ async def reset_password(request: dict):
         email = request.get("email")
         otp = request.get("otp")
         new_password = request.get("new_password")
+        if not DISABLE_OTP:
+            otp_record = supabase.table("otp_codes")\
+                .select("*")\
+                .eq("email", email)\
+                .eq("otp", otp)\
+                .eq("verified", True)\
+                .execute()
+            if not otp_record.data:
+                raise HTTPException(status_code=400, detail="Invalid or unverified OTP")
+            otp_data = otp_record.data[0]
+            expires_at = datetime.fromisoformat(otp_data["expires_at"].replace('Z', '+00:00'))
+            if datetime.now(timezone.utc) > expires_at:
+                raise HTTPException(status_code=400, detail="OTP has expired")
         
-        otp_record = supabase.table("otp_codes")\
-            .select("*")\
-            .eq("email", email)\
-            .eq("otp", otp)\
-            .eq("verified", True)\
-            .execute()
-        
-        if not otp_record.data:
-            raise HTTPException(status_code=400, detail="Invalid or unverified OTP")
-        
-        otp_data = otp_record.data[0]
-        expires_at = datetime.fromisoformat(otp_data["expires_at"].replace('Z', '+00:00'))
-        
-        if datetime.now(timezone.utc) > expires_at:
-            raise HTTPException(status_code=400, detail="OTP has expired")
-        
-        password_hash = pwd_context.hash(new_password)
+        password_hash = get_password_hash(new_password)
         
         result = supabase.table("users")\
             .update({"password_hash": password_hash})\
@@ -1131,8 +1177,8 @@ async def reset_password(request: dict):
         
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to update password")
-        
-        supabase.table("otp_codes").delete().eq("email", email).execute()
+        if not DISABLE_OTP:
+            supabase.table("otp_codes").delete().eq("email", email).execute()
         
         return {"message": "Password reset successfully"}
     except HTTPException:
@@ -1154,7 +1200,7 @@ async def change_password(body: ChangePasswordRequest, current_user = Depends(ge
         row = user_res.data[0]
         if not verify_password(body.current_password, row.get("password_hash") or ""):
             raise HTTPException(status_code=400, detail="Current password is incorrect")
-        new_hash = pwd_context.hash(body.new_password)
+        new_hash = get_password_hash(body.new_password)
         upd = supabase.table("users").update({
             "password_hash": new_hash,
             "updated_at": datetime.utcnow().isoformat()

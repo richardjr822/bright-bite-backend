@@ -1,5 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 import os
 from fastapi.staticfiles import StaticFiles
 from app.api.router import api_router
@@ -22,6 +24,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Enable gzip compression for faster responses over the wire
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# Lightweight caching for static uploads
+class UploadsCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        try:
+            if request.url.path.startswith("/uploads") and request.method == "GET" and 200 <= response.status_code < 300:
+                # Cache uploaded assets for 7 days; adjust as needed
+                response.headers.setdefault("Cache-Control", "public, max-age=604800, immutable")
+        except Exception:
+            # Never block the response on cache header logic
+            pass
+        return response
+
+app.add_middleware(UploadsCacheMiddleware)
 
 # Include API router with /api prefix
 app.include_router(api_router, prefix="/api")
