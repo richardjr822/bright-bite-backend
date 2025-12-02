@@ -123,49 +123,61 @@ def _patch_prefs(user_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         return _load_prefs(user_id) or {}
 
 # ---------- Meal plan storage ----------
-def _save_plan(user_id: str, plan: Dict[str, List[Dict[str, Any]]] ):
+def _save_plan(user_id: str, plan: Dict[str, List[Dict[str, Any]]]) -> bool:
     """Persist generated plan meals into separate table generated_plan_meals, leaving user intake (meals) untouched.
 
     Table expected schema (Postgres suggestion):
       id (bigint PK), user_id text, day text, name text, meal_type text, calories int,
       protein int, carbs int, fats int, prep_time int, description text, created_at timestamptz default now()
 
-    This function is resilient: if table doesn't exist or insertion fails, it silently returns.
+    Returns True if save succeeded, False otherwise.
     """
     sb = _client()
     if not sb:
-        return
+        print("[_save_plan] No Supabase client available")
+        return False
+    
     rows = []
     for day, meals in (plan or {}).items():
         for m in meals or []:
             macros = m.get("macros") or {}
             rows.append({
-                "user_id": user_id,
-                "day": day,
+                "user_id": str(user_id),  # Ensure string for text column
+                "day": day.lower(),
                 "name": m.get("name", "Meal"),
                 "meal_type": (m.get("type") or m.get("meal_type") or "snack").lower(),
                 "calories": int(m.get("calories", 0) or 0),
                 "protein": int(macros.get("protein", 0) or 0),
                 "carbs": int(macros.get("carbs", 0) or 0),
                 "fats": int(macros.get("fats", 0) or 0),
-                "prep_time": int(m.get("prep_time", 20) or 20),
-                "description": m.get("description", "Generated meal."),
+                "prep_time": int(m.get("prep_time") or m.get("prepTime") or 20),
+                "description": (m.get("description") or "Generated meal.")[:500],
             })
+    
     if not rows:
-        return
+        print(f"[_save_plan] No rows to save for user {user_id}")
+        return False
+    
+    print(f"[_save_plan] Saving {len(rows)} meals for user {user_id}")
+    
     try:
-        # Remove previous generated meals for user (ignore failures)
-        sb.table(PLAN_TABLE).delete().eq("user_id", user_id).execute()
-    except Exception:
-        # table may not exist yet; continue and attempt insert below
-        pass
+        # Remove previous generated meals for user
+        del_result = sb.table(PLAN_TABLE).delete().eq("user_id", str(user_id)).execute()
+        print(f"[_save_plan] Deleted old meals: {getattr(del_result, 'data', [])}")
+    except Exception as e:
+        print(f"[_save_plan] Delete failed (may not exist yet): {e}")
+    
     try:
-        chunk = 500
+        chunk = 100  # Smaller chunks for reliability
         for i in range(0, len(rows), chunk):
-            sb.table(PLAN_TABLE).insert(rows[i:i+chunk]).execute()
-    except Exception:
-        # Ignore partial failures or missing table
-        pass
+            batch = rows[i:i+chunk]
+            result = sb.table(PLAN_TABLE).insert(batch).execute()
+            inserted = getattr(result, 'data', [])
+            print(f"[_save_plan] Inserted batch {i//chunk + 1}: {len(inserted)} rows")
+        return True
+    except Exception as e:
+        print(f"[_save_plan] Insert failed: {e}")
+        return False
 
 def _load_saved_plan(user_id: str, meals_per_day: int) -> Dict[str, List[Dict[str, Any]]]:
     """Load generated plan from generated_plan_meals table grouped by day.
@@ -174,11 +186,14 @@ def _load_saved_plan(user_id: str, meals_per_day: int) -> Dict[str, List[Dict[st
     """
     sb = _client()
     if not sb:
+        print("[_load_saved_plan] No Supabase client")
         return {}
     try:
-        r = sb.table(PLAN_TABLE).select("*").eq("user_id", user_id).order("day", desc=False).order("id", desc=False).execute()
+        r = sb.table(PLAN_TABLE).select("*").eq("user_id", str(user_id)).order("day", desc=False).order("id", desc=False).execute()
         rows = getattr(r, "data", []) or []
-    except Exception:
+        print(f"[_load_saved_plan] Found {len(rows)} meals for user {user_id}")
+    except Exception as e:
+        print(f"[_load_saved_plan] Query failed: {e}")
         return {}
     if not rows:
         return {}
@@ -188,10 +203,14 @@ def _load_saved_plan(user_id: str, meals_per_day: int) -> Dict[str, List[Dict[st
         day = (row.get("day") or "").lower()
         if day not in out:
             continue
+        # Normalize meal type capitalization
+        meal_type_raw = row.get("meal_type") or "snack"
+        meal_type = meal_type_raw.capitalize() if meal_type_raw else "Snack"
+        
         out[day].append({
             "id": str(row.get("id")),
-            "name": row.get("name"),
-            "type": row.get("meal_type"),
+            "name": row.get("name") or "Meal",
+            "type": meal_type,
             "calories": int(row.get("calories", 0) or 0),
             "prep_time": int(row.get("prep_time", 20) or 20),
             "description": row.get("description") or "Generated meal.",
@@ -265,12 +284,9 @@ def legacy_put_prefs(user_id: str, body: Dict[str, Any] = Body(default={})):
     updated = _patch_prefs(user_id, body or {})
     return {"preferences": updated}
 
-# Expose both routers under this module's `router`
-combined_router = _APIRouter()
-combined_router.include_router(router)          # /meal-plans/...
-combined_router.include_router(legacy_router)   # /meal-preferences/...
-
-router = combined_router
+# Create a meals router with the /meal-plans prefix for meal logging routes
+# NOTE: Routes are added below, then combined at end of file
+meals_router = _APIRouter(prefix="/meal-plans", tags=["meal-plans"])
 
 # ---------- Plan Generation & Logging Routes ----------
 def _update_plan_hash(user_id: str, plan_hash: str):
@@ -299,7 +315,7 @@ def _has_saved_plan(user_id: str) -> bool:
         return False
 
 # ---------- Routes: AI Plan Generation ----------
-@router.post("/generate")
+@meals_router.post("/generate")
 def generate_plan(preferences: Dict[str, Any] = Body(default={}), request: Request = None):
     user_id = (preferences or {}).get("userId") or (request.headers.get("x-user-id") if request else None)
     if not user_id:
@@ -374,19 +390,37 @@ def generate_plan(preferences: Dict[str, Any] = Body(default={}), request: Reque
         if plan:
             return {"plan": plan, "reused": True, "persisted": True}
 
+    print(f"[generate] Generating new plan for user {user_id} with prefs: goal={norm.get('goal')}, meals={norm.get('mealsPerDay')}, calories={norm.get('calorieTarget')}")
+    
     plan = ai_generate(norm)
     if not isinstance(plan, dict):
+        print(f"[generate] AI returned invalid plan type: {type(plan)}")
         raise HTTPException(status_code=500, detail="AI returned invalid plan")
+    
+    # Validate plan has meals
+    total_meals = sum(len(meals) for meals in plan.values() if isinstance(meals, list))
+    print(f"[generate] Generated plan with {total_meals} total meals across {len(plan)} days")
+    
+    if total_meals == 0:
+        print("[generate] WARNING: Generated plan has no meals, using fallback")
+        from app.meal_plans.ai_service import _rule_based
+        plan = _rule_based(norm)
 
-    # Best-effort persistence (skip if client not configured)
+    # Persist to database
+    persisted = False
     try:
-        _save_plan(user_id, plan)
-        _update_plan_hash(user_id, current_hash)
-    except Exception:
-        pass
-    return {"plan": plan, "reused": False, "persisted": True}
+        persisted = _save_plan(user_id, plan)
+        if persisted:
+            _update_plan_hash(user_id, current_hash)
+            print(f"[generate] Plan saved and hash updated for user {user_id}")
+        else:
+            print(f"[generate] Plan save returned False for user {user_id}")
+    except Exception as e:
+        print(f"[generate] Failed to persist plan: {e}")
+    
+    return {"plan": plan, "reused": False, "persisted": persisted}
 
-@router.get("/plan")
+@meals_router.get("/plan")
 def get_saved_plan(request: Request):
     user_id = request.headers.get("x-user-id")
     if not user_id:
@@ -402,7 +436,7 @@ def get_saved_plan(request: Request):
     return {"plan": plan, "plan_hash": prefs.get("plan_hash"), "persisted": True}
 
 # ---------- Routes: Meal Logging ----------
-@router.post("/meals", status_code=201)
+@meals_router.post("/meals", status_code=201)
 def log_meal(meal: Dict[str, Any] = Body(default={}), request: Request = None):
     sb = _client()
     if not sb:
@@ -440,7 +474,7 @@ def log_meal(meal: Dict[str, Any] = Body(default={}), request: Request = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to log meal: {e}")
 
-@router.get("/meals")
+@meals_router.get("/meals")
 def list_meals(today: bool = Query(False, description="If true, only return today's meals"), request: Request = None):
     sb = _client()
     if not sb:
@@ -459,7 +493,7 @@ def list_meals(today: bool = Query(False, description="If true, only return toda
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list meals: {e}")
 
-@router.get("/meals/summary")
+@meals_router.get("/meals/summary")
 def meals_summary_today(request: Request = None):
     sb = _client()
     if not sb:
@@ -482,6 +516,62 @@ def meals_summary_today(request: Request = None):
         return {"summary": {"date": start_iso[:10], "totals": totals, "count": len(meals)}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to compute summary: {e}")
+
+@meals_router.delete("/meals/{meal_id}")
+def delete_meal(meal_id: str, request: Request):
+    sb = _client()
+    if not sb:
+        raise HTTPException(status_code=500, detail="Supabase client not configured")
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing x-user-id")
+    try:
+        # Only delete if meal belongs to user
+        res = sb.table("meals").delete().eq("id", meal_id).eq("user_id", user_id).execute()
+        deleted = getattr(res, "data", []) or []
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Meal not found or not owned by user")
+        return {"success": True, "deleted": deleted[0] if deleted else None}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete meal: {e}")
+
+@meals_router.patch("/meals/{meal_id}")
+def update_meal(meal_id: str, updates: Dict[str, Any] = Body(default={}), request: Request = None):
+    sb = _client()
+    if not sb:
+        raise HTTPException(status_code=500, detail="Supabase client not configured")
+    user_id = request.headers.get("x-user-id") if request else None
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing x-user-id")
+    
+    # Build update payload
+    allowed_fields = ["name", "meal_type", "calories", "protein", "carbs", "fats", "meal_time"]
+    payload = {}
+    for field in allowed_fields:
+        if field in updates:
+            payload[field] = updates[field]
+        # Handle camelCase variants
+        camel = "".join(word.capitalize() if i else word for i, word in enumerate(field.split("_")))
+        if camel in updates:
+            payload[field] = updates[camel]
+    
+    if not payload:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+    
+    payload["updated_at"] = _now_iso()
+    
+    try:
+        res = sb.table("meals").update(payload).eq("id", meal_id).eq("user_id", user_id).execute()
+        updated = getattr(res, "data", []) or []
+        if not updated:
+            raise HTTPException(status_code=404, detail="Meal not found or not owned by user")
+        return {"success": True, "meal": updated[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update meal: {e}")
 
 def preference_signature(prefs: dict) -> str:
     keys = ["goal","macroPreference","calorieTarget","mealsPerDay","dietaryPreference",
@@ -538,4 +628,13 @@ Output ONLY JSON.
 
 # In /generate route ensure existing plan reuse:
 # (Make sure you previously added plan_hash + plan reuse logic)
+
+# ---------- Combine all routers at END of file (after all routes defined) ----------
+combined_router = _APIRouter()
+combined_router.include_router(router)          # /meal-plans/... (preferences routes)
+combined_router.include_router(legacy_router)   # /meal-preferences/...
+combined_router.include_router(meals_router)    # /meal-plans/... (generate, plan, meals routes)
+
+# Export combined router as module's router
+router = combined_router
 

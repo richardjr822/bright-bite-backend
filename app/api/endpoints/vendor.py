@@ -82,19 +82,40 @@ async def list_vendors():
     Return basic list of vendors (users with role='vendor').
     """
     try:
+        # Fetch vendors (users table)
         res = supabase.table("users").select("id, full_name, organization, email").eq("role", "vendor").execute()
+        rows = res.data or []
+        vendor_ids = [r.get("id") for r in rows if r.get("id")]
+
+        # Attempt to fetch vendor_profiles for logos in one batch
+        logos_map = {}
+        try:
+            if vendor_ids:
+                vpres = supabase.table("vendor_profiles").select("user_id, logo_url, business_name, business_address").in_("user_id", vendor_ids).execute()
+                for vp in (vpres.data or []):
+                    logos_map[vp.get("user_id")] = {
+                        "logo_url": vp.get("logo_url"),
+                        "business_address": vp.get("business_address") or "",
+                    }
+        except Exception:
+            logos_map = {}
+
         vendors = []
-        for v in (res.data or []):
+        for v in rows:
+            vid = v.get("id")
+            vp = logos_map.get(vid) or {}
             vendors.append({
-                "id": v.get("id"),
+                "id": vid,
                 "name": v.get("organization") or v.get("full_name") or "Vendor",
                 "description": v.get("full_name") or "",
                 "rating": 4.7,
                 "reviews": 0,
-                "location": "",
+                "location": vp.get("business_address") or "Campus",
                 "type": "campus_canteen",
                 "isOpen": True,
                 "prepTime": "10-15 min",
+                # expose logo url (relative path like /uploads/vendor-logos/.. or absolute)
+                "logoUrl": vp.get("logo_url"),
             })
         return {"vendors": vendors}
     except Exception as e:
@@ -162,6 +183,38 @@ async def delete_notification(notification_id: str):
         print(f"Error in delete_notification: {str(e)}", file=sys.stderr)
         raise HTTPException(status_code=500, detail="Failed to delete notification")
 
+# ==================== VENDOR PROFILE / LOGO ====================
+
+@router.post("/profile/logo")
+async def upload_vendor_logo(logo: UploadFile = File(...), current=Depends(get_current_user)):
+    """Upload vendor logo image and persist its URL on vendor_profiles when available.
+    Returns the public URL to the uploaded logo.
+    """
+    try:
+        vendor_id = current.get("sub") if isinstance(current, dict) else None
+        if not vendor_id:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        # Save file to uploads/vendor-logos
+        logo_url = await save_upload_file(logo, subfolder="vendor-logos")
+
+        # Best-effort update vendor_profiles.logo_url if column exists
+        try:
+            supabase.table("vendor_profiles").update({
+                "logo_url": logo_url,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("user_id", vendor_id).execute()
+        except Exception as e:
+            # Non-fatal if column missing
+            print(f"upload_vendor_logo: vendor_profiles update skipped: {e}", file=sys.stderr)
+
+        return {"logo_url": logo_url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in upload_vendor_logo: {str(e)}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="Failed to upload logo")
+
 # ==================== VENDOR DASHBOARD ====================
 
 @router.get("/dashboard/{vendor_id}")
@@ -177,6 +230,15 @@ async def get_vendor_dashboard(vendor_id: str):
             raise HTTPException(status_code=404, detail="Vendor not found")
         
         vendor_data = vendor.data[0]
+
+        # Fetch vendor profile for additional info like logo_url
+        logo_url = None
+        try:
+            vp = supabase.table("vendor_profiles").select("logo_url, business_name").eq("user_id", vendor_id).limit(1).execute()
+            if vp.data:
+                logo_url = (vp.data[0] or {}).get("logo_url")
+        except Exception:
+            logo_url = None
         
         # Get today's date
         today = datetime.now(timezone.utc).date()
@@ -268,7 +330,8 @@ async def get_vendor_dashboard(vendor_id: str):
         return {
             "businessInfo": {
                 "name": vendor_data.get("organization") or vendor_data.get("full_name") or "Vendor",
-                "description": vendor_data.get("full_name", "")
+                "description": vendor_data.get("full_name", ""),
+                "logoUrl": logo_url,
             },
             "todayOrders": len(today_orders.data) if today_orders.data else 0,
             "pendingOrders": len(pending_orders.data) if pending_orders.data else 0,
@@ -632,7 +695,7 @@ async def list_delivery_staff(current=Depends(get_current_user)):
         except Exception:
             pass
 
-        ds_res = supabase.table("delivery_staff").select("id, user_id, staff_id").eq("vendor_id", vendor_id).order("created_at", desc=True).execute()
+        ds_res = supabase.table("delivery_staff").select("id, user_id, staff_id, profile_photo_url, phone").eq("vendor_id", vendor_id).order("created_at", desc=True).execute()
         ds_list = ds_res.data or []
 
         user_ids = [row.get("user_id") for row in ds_list if row.get("user_id")]
@@ -650,6 +713,8 @@ async def list_delivery_staff(current=Depends(get_current_user)):
                 "user_id": row.get("user_id"),
                 "full_name": u.get("full_name"),
                 "email": u.get("email"),
+                "profile_photo_url": row.get("profile_photo_url"),
+                "phone": row.get("phone"),
             })
 
         return {"staff": result}
@@ -816,6 +881,10 @@ async def create_menu_item(
     has_discount: Optional[bool] = Form(False),
     discount_percentage: Optional[int] = Form(0),
     image: Optional[UploadFile] = File(None),
+    calories: Optional[float] = Form(None),
+    protein: Optional[float] = Form(None),
+    carbs: Optional[float] = Form(None),
+    fiber: Optional[float] = Form(None),
 ):
     """Create a new menu item. Supports multipart form with file upload, or JSON body fallback."""
     try:
@@ -831,6 +900,10 @@ async def create_menu_item(
             has_discount = payload.get("has_discount", False)
             discount_percentage = payload.get("discount_percentage", 0)
             image_url = payload.get("image_url")
+            calories = payload.get("calories")
+            protein = payload.get("protein")
+            carbs = payload.get("carbs")
+            fiber = payload.get("fiber")
         else:
             image_url = None
 
@@ -858,7 +931,36 @@ async def create_menu_item(
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        result = supabase.table("menu_items").insert(menu_item_data).execute()
+        if calories is not None:
+            try:
+                menu_item_data["calories"] = float(calories)
+            except Exception:
+                pass
+        if protein is not None:
+            try:
+                menu_item_data["protein"] = float(protein)
+            except Exception:
+                pass
+        if carbs is not None:
+            try:
+                menu_item_data["carbs"] = float(carbs)
+            except Exception:
+                pass
+        if fiber is not None:
+            try:
+                menu_item_data["fiber"] = float(fiber)
+            except Exception:
+                pass
+
+        try:
+            result = supabase.table("menu_items").insert(menu_item_data).execute()
+        except Exception as e:
+            try:
+                for k in ["calories","protein","carbs","fiber"]:
+                    menu_item_data.pop(k, None)
+                result = supabase.table("menu_items").insert(menu_item_data).execute()
+            except Exception:
+                raise e
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to create menu item")
         return {"message": "Menu item created successfully", "item": result.data[0]}
@@ -880,15 +982,27 @@ async def update_menu_item(
     has_discount: Optional[bool] = Form(None),
     discount_percentage: Optional[int] = Form(None),
     image: Optional[UploadFile] = File(None),
+    calories: Optional[float] = Form(None),
+    protein: Optional[float] = Form(None),
+    carbs: Optional[float] = Form(None),
+    fiber: Optional[float] = Form(None),
 ):
     """Update a menu item. Supports JSON body or multipart form with optional new image."""
     try:
         # If JSON request, use original logic for compatibility
         if (request.headers.get("content-type") or "").startswith("application/json"):
             payload = await request.json()
-            update_data = {k: v for k, v in payload.items() if k in {"name","description","price","category","image_url","is_available","has_discount","discount_percentage"}}
+            update_data = {k: v for k, v in payload.items() if k in {"name","description","price","category","image_url","is_available","has_discount","discount_percentage","calories","protein","carbs","fiber"}}
             update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-            result = supabase.table("menu_items").update(update_data).eq("id", item_id).execute()
+            try:
+                result = supabase.table("menu_items").update(update_data).eq("id", item_id).execute()
+            except Exception as e:
+                try:
+                    for k in ["calories","protein","carbs","fiber"]:
+                        update_data.pop(k, None)
+                    result = supabase.table("menu_items").update(update_data).eq("id", item_id).execute()
+                except Exception:
+                    raise e
             if not result.data:
                 raise HTTPException(status_code=404, detail="Menu item not found")
             return {"message": "Menu item updated successfully", "item": result.data[0]}
@@ -909,6 +1023,26 @@ async def update_menu_item(
             update_data["has_discount"] = bool(has_discount)
         if discount_percentage is not None:
             update_data["discount_percentage"] = int(discount_percentage)
+        if calories is not None:
+            try:
+                update_data["calories"] = float(calories)
+            except Exception:
+                pass
+        if protein is not None:
+            try:
+                update_data["protein"] = float(protein)
+            except Exception:
+                pass
+        if carbs is not None:
+            try:
+                update_data["carbs"] = float(carbs)
+            except Exception:
+                pass
+        if fiber is not None:
+            try:
+                update_data["fiber"] = float(fiber)
+            except Exception:
+                pass
 
         if image is not None:
             try:
@@ -922,7 +1056,15 @@ async def update_menu_item(
             return {"message": "No changes"}
 
         update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-        result = supabase.table("menu_items").update(update_data).eq("id", item_id).execute()
+        try:
+            result = supabase.table("menu_items").update(update_data).eq("id", item_id).execute()
+        except Exception as e:
+            try:
+                for k in ["calories","protein","carbs","fiber"]:
+                    update_data.pop(k, None)
+                result = supabase.table("menu_items").update(update_data).eq("id", item_id).execute()
+            except Exception:
+                raise e
         if not result.data:
             raise HTTPException(status_code=404, detail="Menu item not found")
         return {"message": "Menu item updated successfully", "item": result.data[0]}
@@ -951,6 +1093,86 @@ async def delete_menu_item(item_id: str):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete menu item: {str(e)}"
         )
+
+@router.get("/ai/recommendations/{vendor_id}")
+async def ai_menu_recommendations(vendor_id: str, limit: int = 3):
+    try:
+        prefs_res = supabase.table("meal_preferences").select("goal, macro_preference, meals_per_day, daily_budget, dietary_preference, allergies").execute()
+        prefs = prefs_res.data or []
+        if not prefs:
+            prefs = []
+
+        goals = {}
+        macros = {}
+        budgets = []
+        mpd = []
+        for p in prefs:
+            g = (p.get("goal") or "maintain").lower()
+            goals[g] = goals.get(g, 0) + 1
+            m = (p.get("macro_preference") or "balanced").lower()
+            macros[m] = macros.get(m, 0) + 1
+            try:
+                if p.get("daily_budget"):
+                    budgets.append(float(p.get("daily_budget")))
+            except Exception:
+                pass
+            try:
+                if p.get("meals_per_day"):
+                    mpd.append(int(p.get("meals_per_day")))
+            except Exception:
+                pass
+
+        def top_key(d: Dict[str, int], default: str) -> str:
+            return max(d.items(), key=lambda x: x[1])[0] if d else default
+
+        top_goal = top_key(goals, "maintain")
+        top_macro = top_key(macros, "balanced")
+        avg_meals = int(sum(mpd) / len(mpd)) if mpd else 3
+        avg_budget = float(sum(budgets) / len(budgets)) if budgets else 180.0
+        price_target = max(60.0, round(avg_budget / max(1, avg_meals), 0))
+
+        existing_res = supabase.table("menu_items").select("name").eq("vendor_id", vendor_id).execute()
+        existing_names = { (r.get("name") or "").strip().lower() for r in (existing_res.data or []) }
+
+        base_pool = []
+        if top_macro == "high-protein":
+            base_pool += [
+                {"name":"Grilled Chicken Power Bowl","category":"Main","calories":550,"protein":45,"carbs":45,"fiber":7},
+                {"name":"Tuna Quinoa Salad","category":"Salad","calories":480,"protein":40,"carbs":35,"fiber":8},
+            ]
+        if top_macro == "low-carb":
+            base_pool += [
+                {"name":"Beef Stir-fry with Cauli Rice","category":"Main","calories":520,"protein":38,"carbs":22,"fiber":6},
+                {"name":"Chicken Lettuce Wraps","category":"Main","calories":420,"protein":35,"carbs":18,"fiber":5},
+            ]
+        base_pool += [
+            {"name":"Tuna Pesto Pasta","category":"Pasta","calories":620,"protein":28,"carbs":70,"fiber":6},
+            {"name":"Veggie Hummus Wrap","category":"Main","calories":450,"protein":16,"carbs":55,"fiber":9},
+            {"name":"Garlic Butter Shrimp Rice Bowl","category":"Main","calories":600,"protein":32,"carbs":65,"fiber":4},
+        ]
+
+        recs = []
+        for r in base_pool:
+            if len(recs) >= max(1, min(limit, 5)):
+                break
+            key = r["name"].strip().lower()
+            if key in existing_names:
+                continue
+            recs.append({
+                "name": r["name"],
+                "description": "Chef-inspired item matched to student preferences.",
+                "category": r["category"],
+                "price": float(price_target),
+                "calories": r["calories"],
+                "protein": r["protein"],
+                "carbs": r["carbs"],
+                "fiber": r["fiber"],
+            })
+
+        return {"recommendations": recs}
+    except Exception as e:
+        print(f"ai_menu_recommendations error: {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="Failed to generate recommendations")
 
 # ==================== ANALYTICS ====================
 
@@ -1021,7 +1243,7 @@ async def get_vendor_earnings(vendor_id: str):
     try:
         # Get all completed orders
         orders = supabase.table("orders") \
-            .select("id, total, created_at, status") \
+            .select("id, total, created_at, status, payment_method") \
             .eq("restaurant_id", vendor_id) \
             .in_("status", ["COMPLETED", "DELIVERED"]) \
             .order("created_at", desc=True) \
@@ -1065,12 +1287,23 @@ async def get_vendor_earnings(vendor_id: str):
             
             monthly_breakdown[month_key] = sum(o.get("total", 0) for o in (month_orders.data or []))
         
+        wallet_earnings = 0.0
+        cash_earnings = 0.0
+        for o in (orders.data or []):
+            pm = (o.get("payment_method") or "").lower()
+            amt = float(o.get("total", 0) or 0)
+            if pm == "wallet":
+                wallet_earnings += amt
+            elif pm == "cash":
+                cash_earnings += amt
         return {
             "total_earnings": total_earnings,
             "monthly_earnings": monthly_earnings,
             "total_orders": len(orders.data) if orders.data else 0,
             "monthly_breakdown": [{"month": month, "amount": amount} for month, amount in sorted(monthly_breakdown.items(), reverse=True)],
-            "recent_transactions": orders.data[:10] if orders.data else []
+            "recent_transactions": orders.data[:10] if orders.data else [],
+            "wallet_earnings": wallet_earnings,
+            "cash_earnings": cash_earnings,
         }
         
     except Exception as e:

@@ -531,7 +531,7 @@ async def admin_list_orders(status_filter: Optional[str] = None, limit: int = 10
         role_resp = supabase.table("users").select("role").eq("id", admin_id).limit(1).execute()
         if not role_resp.data or role_resp.data[0].get("role") != "admin":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin privileges required")
-        q = supabase.table("orders").select("id, order_code, user_id, restaurant_id, status, total, created_at, updated_at")
+        q = supabase.table("orders").select("id, order_code, user_id, restaurant_id, status, total, payment_method, created_at, updated_at")
         if status_filter:
             q = q.eq("status", status_filter)
         res = q.order("created_at", desc=True).limit(limit).execute()
@@ -722,6 +722,11 @@ async def admin_change_password(body: ChangePasswordBody, current_user = Depends
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin privileges required")
         if not verify_password(body.current_password, user_row.get("password_hash") or ""):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
+        # Enforce strong policy and prevent reuse
+        if body.current_password == body.new_password:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="New password must be different from current password")
+        if not body.new_password or len(body.new_password) < 8 or not re.search(r"[A-Z]", body.new_password) or not re.search(r"\d", body.new_password):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="New password must be at least 8 characters and include an uppercase letter and a number")
         new_hash = get_password_hash(body.new_password)
         updated_at = datetime.now(timezone.utc).isoformat()
         upd = supabase.table("users").update({
