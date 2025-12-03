@@ -53,7 +53,8 @@ def _load_prefs(user_id: str) -> Optional[Dict[str, Any]]:
     sb = _client()
     if not sb: return None
     try:
-        r = sb.table("meal_preferences").select("*").eq("user_id", user_id).limit(1).execute()
+        # Get the most recent preference row for this user (order by updated_at desc)
+        r = sb.table("meal_preferences").select("*").eq("user_id", user_id).order("updated_at", desc=True).limit(1).execute()
         rows = getattr(r, "data", []) or []
         return rows[0] if rows else None
     except Exception:
@@ -62,6 +63,7 @@ def _load_prefs(user_id: str) -> Optional[Dict[str, Any]]:
 def _create_prefs(user_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     sb = _client()
     if not sb: return {}
+    # Accept BOTH camelCase and snake_case from frontend
     row = {
         "user_id": user_id,
         "age": data.get("age"),
@@ -69,20 +71,20 @@ def _create_prefs(user_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "height": data.get("height"),
         "weight": data.get("weight"),
         "goal": data.get("goal", "maintain"),
-        "activity_level": data.get("activityLevel", "moderate"),
-        "dietary_preference": data.get("dietaryPreference", []),
-        "avoid_foods": data.get("avoidFoods", ""),
+        "activity_level": data.get("activity_level") or data.get("activityLevel", "moderate"),
+        "dietary_preference": data.get("dietary_preference") or data.get("dietaryPreference", []),
+        "avoid_foods": data.get("avoid_foods") or data.get("avoidFoods", ""),
         "allergies": data.get("allergies", []),
-        "health_conditions": data.get("healthConditions", []),
-        "calorie_target": data.get("calorieTarget", 2000),
-        "macro_preference": data.get("macroPreference", "balanced"),
-        "meals_per_day": data.get("mealsPerDay", 3),
-        "meal_complexity": data.get("mealComplexity", "simple"),
-        "meal_prep_style": data.get("mealPrepStyle", "daily"),
-        "daily_budget": data.get("dailyBudget"),
-        "cooking_time": data.get("cookingTime"),
-        "cooking_methods": data.get("cookingMethod", []),
-        "special_goals": data.get("specialGoals", []),
+        "health_conditions": data.get("health_conditions") or data.get("healthConditions", []),
+        "calorie_target": data.get("calorie_target") or data.get("calorieTarget", 2000),
+        "macro_preference": data.get("macro_preference") or data.get("macroPreference", "balanced"),
+        "meals_per_day": data.get("meals_per_day") or data.get("mealsPerDay", 3),
+        "meal_complexity": data.get("meal_complexity") or data.get("mealComplexity", "simple"),
+        "meal_prep_style": data.get("meal_prep_style") or data.get("mealPrepStyle", "daily"),
+        "daily_budget": data.get("daily_budget") or data.get("dailyBudget"),
+        "cooking_time": data.get("cooking_time") or data.get("cookingTime"),
+        "cooking_methods": data.get("cooking_methods") or data.get("cookingMethod", []),
+        "special_goals": data.get("special_goals") or data.get("specialGoals", []),
         "appetite": data.get("appetite", "normal"),
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
@@ -97,16 +99,27 @@ def _create_prefs(user_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
 def _patch_prefs(user_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     sb = _client()
     if not sb: return {}
+    # Accept BOTH camelCase and snake_case keys from frontend
     mapping = {
+        # Direct snake_case (what frontend api.js sends)
         "age":"age","sex":"sex","height":"height","weight":"weight",
-        "goal":"goal","activityLevel":"activity_level",
+        "goal":"goal","activity_level":"activity_level",
+        "dietary_preference":"dietary_preference","avoid_foods":"avoid_foods",
+        "allergies":"allergies","health_conditions":"health_conditions",
+        "calorie_target":"calorie_target","macro_preference":"macro_preference",
+        "meals_per_day":"meals_per_day","meal_complexity":"meal_complexity",
+        "meal_prep_style":"meal_prep_style","daily_budget":"daily_budget",
+        "cooking_time":"cooking_time","cooking_methods":"cooking_methods",
+        "special_goals":"special_goals","appetite":"appetite",
+        # Also accept camelCase (legacy support)
+        "activityLevel":"activity_level",
         "dietaryPreference":"dietary_preference","avoidFoods":"avoid_foods",
-        "allergies":"allergies","healthConditions":"health_conditions",
+        "healthConditions":"health_conditions",
         "calorieTarget":"calorie_target","macroPreference":"macro_preference",
         "mealsPerDay":"meals_per_day","mealComplexity":"meal_complexity",
         "mealPrepStyle":"meal_prep_style","dailyBudget":"daily_budget",
         "cookingTime":"cooking_time","cookingMethod":"cooking_methods",
-        "specialGoals":"special_goals","appetite":"appetite",
+        "specialGoals":"special_goals",
     }
     upd = {}
     for k,v in patch.items():
@@ -115,11 +128,24 @@ def _patch_prefs(user_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
             upd[col] = v
     if not upd: return _load_prefs(user_id) or {}
     upd["updated_at"] = _now_iso()
+    
     try:
-        r = sb.table("meal_preferences").upsert({**upd, "user_id": user_id}).execute()
-        rows = getattr(r, "data", []) or []
-        return rows[0] if rows else (_load_prefs(user_id) or {})
-    except Exception:
+        # First check if user already has preferences
+        existing = _load_prefs(user_id)
+        if existing and existing.get("id"):
+            # UPDATE existing row by ID
+            r = sb.table("meal_preferences").update(upd).eq("id", existing["id"]).execute()
+            rows = getattr(r, "data", []) or []
+            return rows[0] if rows else (_load_prefs(user_id) or {})
+        else:
+            # INSERT new row
+            upd["user_id"] = user_id
+            upd["created_at"] = _now_iso()
+            r = sb.table("meal_preferences").insert(upd).execute()
+            rows = getattr(r, "data", []) or []
+            return rows[0] if rows else upd
+    except Exception as e:
+        print(f"[_patch_prefs] Error: {e}")
         return _load_prefs(user_id) or {}
 
 # ---------- Meal plan storage ----------
@@ -248,11 +274,19 @@ def patch_preferences(preferences: Dict[str, Any] = Body(default={}), request: R
     user_id = (preferences or {}).get("userId") or (request.headers.get("x-user-id") if request else None)
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing userId")
+    
+    # Debug: log incoming preferences
+    print(f"[patch_preferences] Received for user {user_id}: goal={preferences.get('goal')}, "
+          f"calorie_target={preferences.get('calorie_target')}, calorieTarget={preferences.get('calorieTarget')}, "
+          f"meals_per_day={preferences.get('meals_per_day')}, mealsPerDay={preferences.get('mealsPerDay')}")
+    
     # Upsert: if none exist, create; else patch
     if not _load_prefs(user_id):
         created = _create_prefs(user_id, preferences or {})
+        print(f"[patch_preferences] Created new prefs: goal={created.get('goal')}, calorie_target={created.get('calorie_target')}, meals_per_day={created.get('meals_per_day')}")
         return {"preferences": created}
     updated = _patch_prefs(user_id, preferences or {})
+    print(f"[patch_preferences] Updated prefs: goal={updated.get('goal')}, calorie_target={updated.get('calorie_target')}, meals_per_day={updated.get('meals_per_day')}")
     return {"preferences": updated}
 
 # Optional: fetch by path user_id (handy for admin/tools)

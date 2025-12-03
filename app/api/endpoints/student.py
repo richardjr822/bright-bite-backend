@@ -242,6 +242,17 @@ async def create_order(request: Request, payload: Dict[str, Any] = Body(default=
     service_type = (payload.get("serviceType") or payload.get("fulfillment") or "").strip().lower()
     if service_type not in {"delivery", "pickup"}:
         service_type = None
+    
+    # Delivery location from checkout
+    delivery_location = payload.get("deliveryLocation") or {}
+    delivery_address = None
+    if delivery_location and isinstance(delivery_location, dict):
+        building = delivery_location.get("building", "").strip()
+        floor = delivery_location.get("floor", "").strip()
+        room = delivery_location.get("room", "").strip()
+        parts = [p for p in [building, floor, room] if p]
+        if parts:
+            delivery_address = ", ".join(parts)
     promos = None
     try:
         original_subtotal = float(total + discount_amount)
@@ -275,6 +286,9 @@ async def create_order(request: Request, payload: Dict[str, Any] = Body(default=
     # Only include promos key if column exists (avoid 500 when column missing)
     if promos:
         row["promos"] = promos
+    # Add delivery address if provided
+    if delivery_address:
+        row["delivery_address"] = delivery_address
 
     try:
         # Try inserting with candidate payment_method values until one passes the DB check
@@ -363,7 +377,7 @@ def get_order(request: Request, order_id: str):
     if not sb:
         raise HTTPException(status_code=500, detail="Database client unavailable")
     try:
-        res = sb.table("orders").select("id, items, total, status, restaurant_id, payment_method, created_at, updated_at, assigned_staff_id").eq("id", order_id).eq("user_id", user_id).limit(1).execute()
+        res = sb.table("orders").select("id, items, total, status, restaurant_id, payment_method, created_at, updated_at, assigned_staff_id, proof_of_delivery_url, order_code, eta_minutes").eq("id", order_id).eq("user_id", user_id).limit(1).execute()
         rows = getattr(res, "data", []) or []
         if not rows:
             raise HTTPException(status_code=404, detail="Order not found")
@@ -679,3 +693,56 @@ def list_refunds(request: Request, order_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch refunds: {e}")
+
+
+@router.get("/promoted-meals")
+def get_promoted_meals(request: Request):
+    """
+    Get all promoted meals from vendors.
+    These are featured meals that vendors have chosen to promote.
+    """
+    try:
+        result = supabase.table("menu_items").select(
+            "id, name, description, price, category, image_url, calories, protein, carbs, fiber, "
+            "vendor_id, is_available, has_discount, discount_percentage, prep_time_minutes, is_vegetarian, "
+            "users!vendor_id(id, full_name, email)"
+        ).eq("is_promoted", True).eq("is_available", True).execute()
+        
+        promoted_meals = []
+        for item in (result.data or []):
+            vendor_info = item.get("users", {})
+            
+            # Try to get vendor business name from vendor_profiles
+            business_name = None
+            if vendor_info and vendor_info.get("id"):
+                vendor_profile = supabase.table("vendor_profiles").select("business_name").eq(
+                    "user_id", vendor_info["id"]
+                ).execute()
+                if vendor_profile.data:
+                    business_name = vendor_profile.data[0].get("business_name")
+            
+            promoted_meals.append({
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "description": item.get("description"),
+                "price": item.get("price"),
+                "category": item.get("category"),
+                "image_url": item.get("image_url"),
+                "calories": item.get("calories"),
+                "protein": item.get("protein"),
+                "carbs": item.get("carbs"),
+                "fiber": item.get("fiber"),
+                "vendor_id": item.get("vendor_id"),
+                "has_discount": item.get("has_discount", False),
+                "discount_percentage": item.get("discount_percentage", 0),
+                "prep_time_minutes": item.get("prep_time_minutes", 15),
+                "is_vegetarian": item.get("is_vegetarian", False),
+                "vendor_name": business_name or vendor_info.get("full_name", "Unknown Vendor"),
+                "vendor_email": vendor_info.get("email", "")
+            })
+        
+        return {"promoted_meals": promoted_meals, "count": len(promoted_meals)}
+        
+    except Exception as e:
+        print(f"Error fetching promoted meals: {str(e)}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch promoted meals: {str(e)}")

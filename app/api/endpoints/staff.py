@@ -180,6 +180,52 @@ async def update_staff_profile(
 
 # ==================== DELIVERIES ====================
 
+@router.get("/staff-info/{staff_id}")
+async def get_staff_info_by_id(staff_id: str):
+    """
+    Get delivery staff public info by delivery_staff table ID.
+    Returns staff name, phone, and profile photo for display in orders.
+    """
+    try:
+        staff_res = supabase.table("delivery_staff") \
+            .select("id, user_id, phone, profile_photo_url, staff_id") \
+            .eq("id", staff_id) \
+            .limit(1) \
+            .execute()
+        
+        if not staff_res.data:
+            raise HTTPException(status_code=404, detail="Staff not found")
+        
+        staff = staff_res.data[0]
+        staff_user_id = staff.get("user_id")
+        
+        # Get user info for name
+        user_res = supabase.table("users") \
+            .select("id, full_name, email") \
+            .eq("id", staff_user_id) \
+            .limit(1) \
+            .execute()
+        
+        user = user_res.data[0] if user_res.data else {}
+        
+        return {
+            "id": staff.get("id"),
+            "staff_id": staff.get("staff_id"),
+            "name": user.get("full_name", "Delivery Staff"),
+            "email": user.get("email", ""),
+            "phone": staff.get("phone", ""),
+            "profile_photo_url": staff.get("profile_photo_url"),
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in get_staff_info_by_id: {str(e)}", file=sys.stderr)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch staff info: {str(e)}"
+        )
+
 @router.get("/deliveries/{user_id}")
 async def get_staff_deliveries(user_id: str, current=Depends(get_current_user)):
     """
@@ -216,7 +262,7 @@ async def get_staff_deliveries(user_id: str, current=Depends(get_current_user)):
         ]
         
         assigned_res = supabase.table("orders") \
-            .select("id, order_code, user_id, items, total, status, created_at, updated_at, assigned_staff_id") \
+            .select("id, order_code, user_id, items, total, status, created_at, updated_at, assigned_staff_id, delivery_address, eta_minutes") \
             .eq("restaurant_id", vendor_id) \
             .eq("assigned_staff_id", staff_id) \
             .in_("status", active_statuses) \
@@ -226,7 +272,7 @@ async def get_staff_deliveries(user_id: str, current=Depends(get_current_user)):
 
         # Fetch available unassigned deliveries (READY_FOR_PICKUP and unassigned) for same vendor
         available_res = supabase.table("orders") \
-            .select("id, order_code, user_id, items, total, status, created_at, updated_at, assigned_staff_id") \
+            .select("id, order_code, user_id, items, total, status, created_at, updated_at, assigned_staff_id, delivery_address, eta_minutes") \
             .eq("restaurant_id", vendor_id) \
             .is_("assigned_staff_id", None) \
             .eq("status", "READY_FOR_PICKUP") \
@@ -238,7 +284,7 @@ async def get_staff_deliveries(user_id: str, current=Depends(get_current_user)):
         user_ids = list({o.get("user_id") for o in (assigned_orders + available_orders) if o.get("user_id")})
         users_map = {}
         if user_ids:
-            users_res = supabase.table("users").select("id, full_name, email").in_("id", user_ids).execute()
+            users_res = supabase.table("users").select("id, full_name, email, phone").in_("id", user_ids).execute()
             users_map = {u["id"]: u for u in (users_res.data or [])}
         
         # Also fetch student profiles for delivery addresses (if exists)
@@ -269,15 +315,21 @@ async def get_staff_deliveries(user_id: str, current=Depends(get_current_user)):
             else:
                 frontend_status = "pending"
             
+            # Use order's delivery_address first, fallback to student profile organization
+            order_address = order.get("delivery_address")
+            fallback_address = student.get("organization_name", "Campus Location")
+            
             deliveries.append({
                 "id": order.get("id"),
                 "order_code": order.get("order_code"),
                 "customer_name": user.get("full_name", "Customer"),
                 "customer_email": user.get("email", ""),
-                "delivery_address": student.get("organization_name", "Campus Location"),
+                "customer_phone": user.get("phone", ""),
+                "delivery_address": order_address or fallback_address,
                 "items": order.get("items", []),
                 "total": order.get("total", 0),
                 "status": frontend_status,
+                "eta_minutes": order.get("eta_minutes", 20),
                 "created_at": order.get("created_at"),
                 "updated_at": order.get("updated_at"),
                 "available": False,
@@ -287,15 +339,21 @@ async def get_staff_deliveries(user_id: str, current=Depends(get_current_user)):
         for order in available_orders:
             user = users_map.get(order.get("user_id"), {})
             student = students_map.get(order.get("user_id"), {})
+            # Use order's delivery_address first, fallback to student profile organization
+            order_address = order.get("delivery_address")
+            fallback_address = student.get("organization_name", "Campus Location")
+            
             deliveries.append({
                 "id": order.get("id"),
                 "order_code": order.get("order_code"),
                 "customer_name": user.get("full_name", "Customer"),
                 "customer_email": user.get("email", ""),
-                "delivery_address": student.get("organization_name", "Campus Location"),
+                "customer_phone": user.get("phone", ""),
+                "delivery_address": order_address or fallback_address,
                 "items": order.get("items", []),
                 "total": order.get("total", 0),
                 "status": "pending",
+                "eta_minutes": order.get("eta_minutes", 20),
                 "created_at": order.get("created_at"),
                 "updated_at": order.get("updated_at"),
                 "available": True,
@@ -384,7 +442,8 @@ async def get_delivery_history(user_id: str, current=Depends(get_current_user)):
 @router.put("/deliveries/{order_id}/status")
 async def update_delivery_status(
     order_id: str,
-    status_update: DeliveryStatusUpdate,
+    delivery_status: str = Form(...),
+    proof_image: Optional[UploadFile] = File(None),
     current=Depends(get_current_user),
 ):
     """
@@ -392,6 +451,8 @@ async def update_delivery_status(
     Valid transitions:
     - pending -> picked-up (status changes to ON_THE_WAY)
     - picked-up -> delivered (status changes to DELIVERED)
+    
+    For 'delivered' status, proof_image is required.
     """
     try:
         # Verify authentication
@@ -430,13 +491,19 @@ async def update_delivery_status(
             raise HTTPException(status_code=403, detail="Order does not belong to your vendor")
         
         current_status = order.get("status", "PENDING_CONFIRMATION")
-        new_frontend_status = status_update.status.lower().strip()
+        new_frontend_status = delivery_status.lower().strip()
         
         # Map frontend status to DB status
         if new_frontend_status == "picked-up":
             new_db_status = "ON_THE_WAY"
         elif new_frontend_status == "delivered":
             new_db_status = "DELIVERED"
+            # Require proof of delivery image
+            if not proof_image:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Proof of delivery image is required when marking as delivered"
+                )
         else:
             raise HTTPException(
                 status_code=400,
@@ -451,11 +518,28 @@ async def update_delivery_status(
                 detail=f"Invalid status transition from {current_status} to {new_db_status}"
             )
         
+        # Upload proof of delivery if provided
+        proof_url = None
+        if proof_image and new_db_status == "DELIVERED":
+            try:
+                proof_url = await save_upload_file(proof_image, subfolder="delivery-proofs")
+            except Exception as e:
+                print(f"Failed to upload proof of delivery: {str(e)}", file=sys.stderr)
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to upload proof of delivery image"
+                )
+        
         # Update order status
         update_payload = {
             "status": new_db_status,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+        
+        # Add proof of delivery URL if uploaded
+        if proof_url:
+            update_payload["proof_of_delivery_url"] = proof_url
+        
         # If picking up and order is unassigned, claim it
         if new_db_status == "ON_THE_WAY" and not order.get("assigned_staff_id"):
             update_payload["assigned_staff_id"] = staff_id

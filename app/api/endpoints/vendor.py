@@ -359,7 +359,7 @@ async def get_vendor_orders(vendor_id: str, status_filter: Optional[str] = None)
     """
     try:
         query = supabase.table("orders") \
-            .select("id, user_id, items, total, status, promos, created_at, updated_at, assigned_staff_id") \
+            .select("id, user_id, items, total, status, promos, created_at, updated_at, assigned_staff_id, proof_of_delivery_url") \
             .eq("restaurant_id", vendor_id) \
             .order("created_at", desc=True)
 
@@ -380,12 +380,12 @@ async def get_vendor_orders(vendor_id: str, status_filter: Optional[str] = None)
             users_res = supabase.table("users").select("id, full_name, email").in_("id", user_ids).execute()
             users_map = {u["id"]: {"full_name": u.get("full_name"), "email": u.get("email")} for u in (users_res.data or [])}
 
-        # Batch fetch staff info
+        # Batch fetch staff info with phone and profile photo
         staff_ids = list({o.get("assigned_staff_id") for o in orders if o.get("assigned_staff_id")})
         staff_users_map: Dict[str, Dict] = {}
         if staff_ids:
             try:
-                ds_res = supabase.table("delivery_staff").select("id, user_id").in_("id", staff_ids).execute()
+                ds_res = supabase.table("delivery_staff").select("id, user_id, phone, profile_photo_url").in_("id", staff_ids).execute()
                 ds_list = ds_res.data or []
                 staff_user_ids = [row.get("user_id") for row in ds_list if row.get("user_id")]
                 user_map2: Dict[str, Dict] = {}
@@ -393,7 +393,13 @@ async def get_vendor_orders(vendor_id: str, status_filter: Optional[str] = None)
                     users_res2 = supabase.table("users").select("id, full_name, email").in_("id", staff_user_ids).execute()
                     user_map2 = {u["id"]: {"full_name": u.get("full_name"), "email": u.get("email")} for u in (users_res2.data or [])}
                 for row in ds_list:
-                    staff_users_map[row.get("id")] = user_map2.get(row.get("user_id"), {})
+                    user_info = user_map2.get(row.get("user_id"), {})
+                    staff_users_map[row.get("id")] = {
+                        "full_name": user_info.get("full_name"),
+                        "email": user_info.get("email"),
+                        "phone": row.get("phone"),
+                        "profile_photo_url": row.get("profile_photo_url")
+                    }
             except Exception as e:
                 print(f"Failed to build staff map: {e}", file=sys.stderr)
 
@@ -424,6 +430,7 @@ async def get_vendor_orders(vendor_id: str, status_filter: Optional[str] = None)
                 "promos": promos or None,
                 "fulfillment": fulfillment,
                 "assigned_staff": staff_users_map.get(assigned_staff_id, None),
+                "proof_of_delivery_url": o.get("proof_of_delivery_url"),
             })
 
         return {"orders": transformed}
@@ -1094,73 +1101,269 @@ async def delete_menu_item(item_id: str):
             detail=f"Failed to delete menu item: {str(e)}"
         )
 
-@router.get("/ai/recommendations/{vendor_id}")
-async def ai_menu_recommendations(vendor_id: str, limit: int = 3):
+@router.patch("/menu/{item_id}/promote")
+async def toggle_menu_promotion(item_id: str, request: Request):
+    """
+    Promote or unpromote a menu item. Only one item per vendor can be promoted.
+    """
     try:
-        prefs_res = supabase.table("meal_preferences").select("goal, macro_preference, meals_per_day, daily_budget, dietary_preference, allergies").execute()
-        prefs = prefs_res.data or []
-        if not prefs:
-            prefs = []
+        payload = await request.json()
+        is_promoted = payload.get("is_promoted", False)
+        
+        # Get the menu item to find vendor_id
+        item_result = supabase.table("menu_items").select("vendor_id").eq("id", item_id).execute()
+        if not item_result.data:
+            raise HTTPException(status_code=404, detail="Menu item not found")
+        
+        vendor_id = item_result.data[0]["vendor_id"]
+        
+        # If promoting, unpromote all other items from this vendor first
+        if is_promoted:
+            supabase.table("menu_items").update({"is_promoted": False}).eq("vendor_id", vendor_id).execute()
+        
+        # Update the target item
+        update_data = {
+            "is_promoted": is_promoted,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        result = supabase.table("menu_items").update(update_data).eq("id", item_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Menu item not found")
+        
+        return {
+            "message": f"Menu item {'promoted' if is_promoted else 'unpromoted'} successfully",
+            "item": result.data[0]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in toggle_menu_promotion: {str(e)}", file=sys.stderr)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update promotion status: {str(e)}"
+        )
 
+@router.get("/ai/recommendations/{vendor_id}")
+async def ai_menu_recommendations(vendor_id: str, limit: int = 5):
+    """
+    Generate AI menu suggestions based on REAL student insights data.
+    Analyzes: goals, macro preferences, dietary restrictions, allergies, budgets, calorie targets.
+    """
+    try:
+        # Fetch ALL student preferences, ordered by most recent
+        prefs_res = supabase.table("meal_preferences").select(
+            "user_id, goal, macro_preference, meals_per_day, daily_budget, "
+            "dietary_preference, allergies, calorie_target, health_conditions"
+        ).order("updated_at", desc=True).execute()
+        all_prefs = prefs_res.data or []
+        
+        # DEDUPLICATE: Keep only the latest preference per user_id
+        seen_users = set()
+        prefs = []
+        for p in all_prefs:
+            user_id = p.get("user_id")
+            if user_id and user_id not in seen_users:
+                seen_users.add(user_id)
+                prefs.append(p)
+        
+        total_students = len(prefs)
+        if total_students == 0:
+            return {"recommendations": [], "insights": {"message": "No student data available yet"}}
+
+        # Aggregate student insights
         goals = {}
         macros = {}
+        dietary_prefs = {}
+        allergies_count = {}
         budgets = []
-        mpd = []
+        calorie_targets = []
+        meals_per_day_list = []
+        
         for p in prefs:
+            # Goals distribution
             g = (p.get("goal") or "maintain").lower()
             goals[g] = goals.get(g, 0) + 1
+            
+            # Macro preferences
             m = (p.get("macro_preference") or "balanced").lower()
             macros[m] = macros.get(m, 0) + 1
+            
+            # Dietary preferences (vegan, vegetarian, keto, etc.)
+            diets = p.get("dietary_preference") or []
+            for d in diets:
+                if d:
+                    dietary_prefs[d.lower()] = dietary_prefs.get(d.lower(), 0) + 1
+            
+            # Allergies to avoid
+            allergies = p.get("allergies") or []
+            for a in allergies:
+                if a:
+                    allergies_count[a.lower()] = allergies_count.get(a.lower(), 0) + 1
+            
+            # Budgets
             try:
                 if p.get("daily_budget"):
                     budgets.append(float(p.get("daily_budget")))
             except Exception:
                 pass
+            
+            # Calorie targets
+            try:
+                if p.get("calorie_target"):
+                    calorie_targets.append(int(p.get("calorie_target")))
+            except Exception:
+                pass
+            
+            # Meals per day
             try:
                 if p.get("meals_per_day"):
-                    mpd.append(int(p.get("meals_per_day")))
+                    meals_per_day_list.append(int(p.get("meals_per_day")))
             except Exception:
                 pass
 
+        # Calculate insights
+        def top_items(d: Dict[str, int], n: int = 3) -> list:
+            return sorted(d.items(), key=lambda x: x[1], reverse=True)[:n]
+        
         def top_key(d: Dict[str, int], default: str) -> str:
             return max(d.items(), key=lambda x: x[1])[0] if d else default
 
         top_goal = top_key(goals, "maintain")
         top_macro = top_key(macros, "balanced")
-        avg_meals = int(sum(mpd) / len(mpd)) if mpd else 3
+        top_diets = top_items(dietary_prefs, 3)
+        top_allergies = top_items(allergies_count, 5)
+        
+        avg_meals = int(sum(meals_per_day_list) / len(meals_per_day_list)) if meals_per_day_list else 3
         avg_budget = float(sum(budgets) / len(budgets)) if budgets else 180.0
-        price_target = max(60.0, round(avg_budget / max(1, avg_meals), 0))
+        avg_calories = int(sum(calorie_targets) / len(calorie_targets)) if calorie_targets else 2000
+        per_meal_calories = avg_calories // avg_meals
+        price_target = max(50.0, round(avg_budget / max(1, avg_meals), 0))
+        
+        # Build allergy exclusion set
+        avoid_ingredients = set()
+        for allergy, count in allergies_count.items():
+            # If more than 10% of students have this allergy, suggest avoiding it
+            if count >= max(1, total_students * 0.1):
+                avoid_ingredients.add(allergy)
 
+        # Get existing menu items to avoid duplicates
         existing_res = supabase.table("menu_items").select("name").eq("vendor_id", vendor_id).execute()
-        existing_names = { (r.get("name") or "").strip().lower() for r in (existing_res.data or []) }
+        existing_names = {(r.get("name") or "").strip().lower() for r in (existing_res.data or [])}
 
+        # Build recommendation pool based on ACTUAL student data
         base_pool = []
-        if top_macro == "high-protein":
+        
+        # High-protein items (for gain goal or high-protein macro preference)
+        if top_goal == "gain" or top_macro == "high-protein":
             base_pool += [
-                {"name":"Grilled Chicken Power Bowl","category":"Main","calories":550,"protein":45,"carbs":45,"fiber":7},
-                {"name":"Tuna Quinoa Salad","category":"Salad","calories":480,"protein":40,"carbs":35,"fiber":8},
+                {"name": "Grilled Chicken Power Bowl", "category": "Main", "calories": 550, "protein": 45, "carbs": 45, "fiber": 7,
+                 "reason": f"High protein ({45}g) supports {goals.get('gain', 0)} students with weight gain goals"},
+                {"name": "Tuna Quinoa Salad", "category": "Salad", "calories": 480, "protein": 40, "carbs": 35, "fiber": 8,
+                 "reason": f"Protein-rich option for {macros.get('high-protein', 0)} high-protein preference students"},
+                {"name": "Beef Salpicao Rice Bowl", "category": "Main", "calories": 620, "protein": 42, "carbs": 55, "fiber": 4,
+                 "reason": "Filipino-inspired high-protein dish perfect for muscle building"},
             ]
-        if top_macro == "low-carb":
+        
+        # Low-carb items (for lose goal or low-carb macro preference)
+        if top_goal == "lose" or top_macro == "low-carb":
             base_pool += [
-                {"name":"Beef Stir-fry with Cauli Rice","category":"Main","calories":520,"protein":38,"carbs":22,"fiber":6},
-                {"name":"Chicken Lettuce Wraps","category":"Main","calories":420,"protein":35,"carbs":18,"fiber":5},
+                {"name": "Grilled Fish with Veggie Medley", "category": "Main", "calories": 380, "protein": 35, "carbs": 18, "fiber": 8,
+                 "reason": f"Low-carb option for {goals.get('lose', 0)} students with weight loss goals"},
+                {"name": "Chicken Lettuce Wraps", "category": "Main", "calories": 320, "protein": 32, "carbs": 12, "fiber": 5,
+                 "reason": f"Only {12}g carbs - ideal for {macros.get('low-carb', 0)} low-carb preference students"},
+                {"name": "Cauliflower Fried Rice", "category": "Main", "calories": 350, "protein": 28, "carbs": 20, "fiber": 6,
+                 "reason": "Low-carb rice alternative with high satisfaction"},
             ]
+        
+        # Vegetarian/Vegan options (based on dietary preferences)
+        vegan_count = dietary_prefs.get("vegan", 0)
+        vegetarian_count = dietary_prefs.get("vegetarian", 0)
+        if vegan_count > 0 or vegetarian_count > 0:
+            base_pool += [
+                {"name": "Buddha Bowl with Tahini", "category": "Main", "calories": 480, "protein": 18, "carbs": 55, "fiber": 12,
+                 "reason": f"Vegan-friendly for {vegan_count} vegan + {vegetarian_count} vegetarian students"},
+                {"name": "Tofu Sisig", "category": "Main", "calories": 420, "protein": 24, "carbs": 35, "fiber": 6,
+                 "reason": "Plant-based Filipino classic - appeals to vegetarian students"},
+                {"name": "Mushroom Adobo Rice Bowl", "category": "Main", "calories": 450, "protein": 14, "carbs": 60, "fiber": 8,
+                 "reason": "Hearty vegetarian option with authentic Filipino flavors"},
+            ]
+        
+        # Balanced/maintain options (most common)
+        if top_goal == "maintain" or top_macro == "balanced":
+            base_pool += [
+                {"name": "Chicken Inasal with Brown Rice", "category": "Main", "calories": per_meal_calories, "protein": 35, "carbs": 50, "fiber": 5,
+                 "reason": f"Balanced macros matching avg target of {per_meal_calories} kcal/meal"},
+                {"name": "Pork Sinigang Bowl", "category": "Main", "calories": 480, "protein": 28, "carbs": 45, "fiber": 6,
+                 "reason": f"Filipino comfort food for {goals.get('maintain', 0)} maintain-goal students"},
+                {"name": "Bangus Belly with Ensalada", "category": "Main", "calories": 520, "protein": 32, "carbs": 40, "fiber": 7,
+                 "reason": "Omega-3 rich local fish - nutritious and satisfying"},
+            ]
+        
+        # Budget-friendly options (if avg budget is low)
+        if avg_budget < 150:
+            base_pool += [
+                {"name": "Arroz Caldo", "category": "Soup", "calories": 380, "protein": 22, "carbs": 50, "fiber": 3,
+                 "reason": f"Budget-friendly at ₱{price_target:.0f} - fits avg budget of ₱{avg_budget:.0f}/day"},
+                {"name": "Tortang Talong", "category": "Main", "calories": 320, "protein": 18, "carbs": 25, "fiber": 6,
+                 "reason": "Affordable vegetable-based option for budget-conscious students"},
+            ]
+        
+        # Keto options
+        if dietary_prefs.get("keto", 0) > 0:
+            base_pool += [
+                {"name": "Keto Lechon Kawali Salad", "category": "Salad", "calories": 450, "protein": 35, "carbs": 8, "fiber": 4,
+                 "reason": f"Keto-friendly for {dietary_prefs.get('keto', 0)} keto diet students"},
+            ]
+        
+        # Always add some universally appealing items
         base_pool += [
-            {"name":"Tuna Pesto Pasta","category":"Pasta","calories":620,"protein":28,"carbs":70,"fiber":6},
-            {"name":"Veggie Hummus Wrap","category":"Main","calories":450,"protein":16,"carbs":55,"fiber":9},
-            {"name":"Garlic Butter Shrimp Rice Bowl","category":"Main","calories":600,"protein":32,"carbs":65,"fiber":4},
+            {"name": "Garlic Butter Shrimp Rice Bowl", "category": "Main", "calories": 580, "protein": 32, "carbs": 55, "fiber": 4,
+             "reason": "Popular choice with balanced nutrition profile"},
+            {"name": "Chicken Teriyaki Bowl", "category": "Main", "calories": 520, "protein": 38, "carbs": 48, "fiber": 5,
+             "reason": "Student favorite with good protein content"},
         ]
 
+        # Filter out items with common allergens if significant allergy counts
+        def has_allergen(item_name: str, allergens: set) -> bool:
+            name_lower = item_name.lower()
+            allergen_keywords = {
+                "shellfish": ["shrimp", "crab", "lobster", "shellfish"],
+                "fish": ["fish", "tuna", "salmon", "bangus"],
+                "gluten": ["pasta", "bread", "wheat"],
+                "dairy": ["cheese", "milk", "cream", "butter"],
+                "eggs": ["egg", "tortang"],
+                "peanuts": ["peanut"],
+                "soy": ["tofu", "soy"],
+            }
+            for allergen in allergens:
+                keywords = allergen_keywords.get(allergen, [allergen])
+                if any(kw in name_lower for kw in keywords):
+                    return True
+            return False
+
+        # Build final recommendations
         recs = []
         for r in base_pool:
-            if len(recs) >= max(1, min(limit, 5)):
+            if len(recs) >= max(1, min(limit, 10)):
                 break
-            key = r["name"].strip().lower()
+            
+            item_name = r["name"].strip()
+            key = item_name.lower()
+            
+            # Skip if already exists
             if key in existing_names:
                 continue
+            
+            # Skip if contains common allergens
+            if has_allergen(item_name, avoid_ingredients):
+                continue
+            
             recs.append({
-                "name": r["name"],
-                "description": "Chef-inspired item matched to student preferences.",
+                "name": item_name,
+                "description": r.get("reason", "Matched to student preferences"),
                 "category": r["category"],
                 "price": float(price_target),
                 "calories": r["calories"],
@@ -1169,7 +1372,22 @@ async def ai_menu_recommendations(vendor_id: str, limit: int = 3):
                 "fiber": r["fiber"],
             })
 
-        return {"recommendations": recs}
+        # Include insights summary for the vendor
+        insights_summary = {
+            "total_students_analyzed": total_students,
+            "top_goal": f"{top_goal} ({goals.get(top_goal, 0)} students, {round(goals.get(top_goal, 0)/total_students*100)}%)",
+            "top_macro": f"{top_macro} ({macros.get(top_macro, 0)} students)",
+            "avg_calorie_target": avg_calories,
+            "avg_budget": round(avg_budget, 2),
+            "suggested_price": price_target,
+            "common_dietary_prefs": [f"{d[0]} ({d[1]})" for d in top_diets],
+            "allergies_to_avoid": [f"{a[0]} ({a[1]} students)" for a in top_allergies if a[1] >= max(1, total_students * 0.1)],
+        }
+
+        return {
+            "recommendations": recs,
+            "insights": insights_summary
+        }
     except Exception as e:
         print(f"ai_menu_recommendations error: {e}", file=sys.stderr)
         raise HTTPException(status_code=500, detail="Failed to generate recommendations")

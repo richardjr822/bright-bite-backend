@@ -531,11 +531,12 @@ async def admin_list_orders(status_filter: Optional[str] = None, limit: int = 10
         role_resp = supabase.table("users").select("role").eq("id", admin_id).limit(1).execute()
         if not role_resp.data or role_resp.data[0].get("role") != "admin":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin privileges required")
-        q = supabase.table("orders").select("id, order_code, user_id, restaurant_id, status, total, payment_method, created_at, updated_at")
+        q = supabase.table("orders").select("id, order_code, user_id, restaurant_id, status, total, items, payment_method, created_at, updated_at, assigned_staff_id, proof_of_delivery_url")
         if status_filter:
             q = q.eq("status", status_filter)
         res = q.order("created_at", desc=True).limit(limit).execute()
         orders = res.data or []
+        
         # Fetch related users in batch
         user_ids = list({o.get("user_id") for o in orders if o.get("user_id")})
         users_map: Dict[str, Dict[str, Any]] = {}
@@ -543,9 +544,41 @@ async def admin_list_orders(status_filter: Optional[str] = None, limit: int = 10
             users_resp = supabase.table("users").select("id, full_name, email").in_("id", user_ids).execute()
             for u in users_resp.data or []:
                 users_map[u.get("id")] = u
+        
+        # Fetch vendor names
+        vendor_ids = list({o.get("restaurant_id") for o in orders if o.get("restaurant_id")})
+        vendors_map: Dict[str, str] = {}
+        if vendor_ids:
+            vp_resp = supabase.table("vendor_profiles").select("user_id, business_name").in_("user_id", vendor_ids).execute()
+            for v in vp_resp.data or []:
+                vendors_map[v.get("user_id")] = v.get("business_name", "Unknown Vendor")
+        
+        # Fetch delivery staff info
+        staff_ids = list({o.get("assigned_staff_id") for o in orders if o.get("assigned_staff_id")})
+        staff_map: Dict[str, Dict[str, Any]] = {}
+        if staff_ids:
+            ds_resp = supabase.table("delivery_staff").select("id, user_id, phone, profile_photo_url").in_("id", staff_ids).execute()
+            ds_list = ds_resp.data or []
+            staff_user_ids = [row.get("user_id") for row in ds_list if row.get("user_id")]
+            user_map2: Dict[str, Dict] = {}
+            if staff_user_ids:
+                users_resp2 = supabase.table("users").select("id, full_name, email").in_("id", staff_user_ids).execute()
+                user_map2 = {u["id"]: u for u in (users_resp2.data or [])}
+            for row in ds_list:
+                user_info = user_map2.get(row.get("user_id"), {})
+                staff_map[row.get("id")] = {
+                    "full_name": user_info.get("full_name"),
+                    "email": user_info.get("email"),
+                    "phone": row.get("phone"),
+                    "profile_photo_url": row.get("profile_photo_url")
+                }
+        
         offset = _validate_offset(tz_offset_minutes)
         for o in orders:
-            o["user"] = users_map.get(o.get("user_id"))
+            user_info = users_map.get(o.get("user_id"), {})
+            o["customer_name"] = user_info.get("full_name", "Unknown")
+            o["vendor_name"] = vendors_map.get(o.get("restaurant_id"), "Unknown Vendor")
+            o["delivery_staff"] = staff_map.get(o.get("assigned_staff_id"))
             o["created_at_local"] = _shift_iso(o.get("created_at"), offset)
             o["updated_at_local"] = _shift_iso(o.get("updated_at"), offset)
         return {"orders": orders, "timezoneOffsetMinutes": offset}

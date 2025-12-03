@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.endpoints import auth, beneficiaries, meal_plans as meal_plans_endpoints, programs, users, nutrition, wallet, rewards, vouchers, deals, feedback, student, vendor, staff, admin, realtime
+from app.api.endpoints import auth, beneficiaries, meal_plans as meal_plans_endpoints, programs, users, nutrition, wallet, rewards, vouchers, deals, feedback, student, vendor, staff, admin, realtime, insights
 
 api_router = APIRouter()
 
@@ -19,4 +19,5 @@ api_router.include_router(vendor.router, prefix="/vendor", tags=["vendor"])
 api_router.include_router(staff.router, prefix="/staff", tags=["staff"]) 
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"]) 
 api_router.include_router(realtime.router, tags=["realtime"])
+api_router.include_router(insights.router, tags=["insights"])
 

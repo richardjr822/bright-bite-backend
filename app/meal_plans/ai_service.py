@@ -8,8 +8,8 @@ except ImportError:
     genai = None
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-# Use a stable model that's widely available
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+# Use correct Gemini model names - gemini-1.5-flash-latest or gemini-2.0-flash-exp
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 PLAN_DAYS = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
 
 def macro_split(calories: int, style: str = "balanced") -> tuple[int,int,int]:

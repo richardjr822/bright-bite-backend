@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 from app.db.database import supabase
@@ -19,6 +19,9 @@ class UserCreate(UserBase):
 class UserResponse(UserBase):
     id: str
     created_at: Optional[str] = None
+
+class AgreeTermsRequest(BaseModel):
+    agreed_to_terms: bool
 
 @router.get("", response_model=List[UserResponse])
 async def get_users():
@@ -66,3 +69,32 @@ async def create_user(user: UserCreate):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating user: {str(e)}")
+
+@router.patch("/{user_id}/agree-terms")
+async def update_terms_agreement(user_id: str, request: AgreeTermsRequest):
+    try:
+        data = {
+            "agreed_to_terms": request.agreed_to_terms,
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        result = supabase.table("users").update(data).eq("id", user_id).execute()
+        
+        if not result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User with id {user_id} not found"
+            )
+        
+        return {
+            "success": True,
+            "message": "Terms agreement updated successfully",
+            "agreed_to_terms": request.agreed_to_terms
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating terms agreement: {str(e)}"
+        )
